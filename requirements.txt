@@ -1,0 +1,5 @@
+streamlit
+anthropic
+pypdf
+duckduckgo-search
+python-dotenv
