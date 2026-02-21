@@ -1,14 +1,12 @@
 import streamlit as st
 import os
-import ast
 import requests
-import re
 from anthropic import Anthropic
 from pypdf import PdfReader
 from duckduckgo_search import DDGS
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="HPE Expert Reviewer Pro", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="HPE Expert Reviewer V3 (Strict)", page_icon="⚖️", layout="wide")
 
 # --- SECURE KEY HANDLING ---
 try:
@@ -28,230 +26,178 @@ client = Anthropic(api_key=api_key)
 # --- SESSION STATE ---
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "full_text" not in st.session_state: st.session_state.full_text = ""
-if "analysis_report" not in st.session_state: st.session_state.analysis_report = ""
-if "evidence_context" not in st.session_state: st.session_state.evidence_context = ""
+if "critique" not in st.session_state: st.session_state.critique = ""
+if "mode" not in st.session_state: st.session_state.mode = "Analyze"
 
-# --- SEARCH TOOLS ---
-
-def search_pubmed(query, max_results=3):
-    """Searches PubMed directly for medical/HPE literature."""
+# --- TOOLS ---
+def search_pubmed(query):
+    """Specific tool for medical literature"""
     try:
-        # Search for IDs
-        base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-        search_url = f"{base_url}/esearch.fcgi?db=pubmed&term={query}&retmode=json&retmax={max_results}"
-        resp = requests.get(search_url).json()
-        ids = resp.get("esearchresult", {}).get("idlist", [])
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={query}&retmode=json&retmax=3"
+        ids = requests.get(url).json().get("esearchresult", {}).get("idlist", [])
+        if not ids: return "No specific papers found."
         
-        if not ids: return "No PubMed articles found."
-
-        # Get Summaries
-        ids_str = ",".join(ids)
-        summary_url = f"{base_url}/esummary.fcgi?db=pubmed&id={ids_str}&retmode=json"
-        summary_resp = requests.get(summary_url).json()
-        
-        results = []
-        for uid in ids:
-            item = summary_resp.get("result", {}).get(uid, {})
-            title = item.get("title", "No title")
-            source = item.get("source", "Unknown Source")
-            pubdate = item.get("pubdate", "No date")
-            results.append(f"- {title} ({source}, {pubdate})")
-            
+        summary_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id={','.join(ids)}&retmode=json"
+        data = requests.get(summary_url).json().get("result", {})
+        results = [f"- {data[uid].get('title')} ({data[uid].get('source')}, {data[uid].get('pubdate')})" for uid in ids if uid != 'uids']
         return "\n".join(results)
-    except Exception as e:
-        return f"PubMed Error: {e}"
+    except: return "PubMed lookup failed."
 
-def search_web(query):
-    """Fallback to DuckDuckGo."""
-    try:
-        results = DDGS().text(query, max_results=3)
-        if results:
-            return "\n".join([f"- {r['title']}: {r['body']} (Source: {r['href']})" for r in results])
-        return "No web results found."
-    except:
-        return "Web search unavailable."
-
-# --- CORE ANALYSIS LOGIC ---
-
-def analyze_manuscript_logic(text):
+# --- CORE LOGIC (THE V1 BRAIN) ---
+def deep_critical_analysis(text):
     """
-    STAGE 1: THE DEEP READ.
-    Focus: Internal logic, methodology, CONSORT/SRQR adherence, flow.
-    NO searching here. Just pure critical analysis.
+    This function uses the STRICT V1 PROMPT. 
+    It focuses purely on logic, methodology, and flow. No distractions.
     """
     system_prompt = (
-        "You are a senior, ruthless academic editor for 'Medical Teacher' and 'BMC Medical Education'. "
-        "You do not summarize. You CRITIQUE. "
-        "You focus on the 'Golden Thread' (alignment of Question -> Methods -> Results). "
-        "You identify methodological flaws, statistical errors, and gaps in logic."
+        "You are a Senior Editor for 'Medical Teacher' and 'BMC Medical Education'. "
+        "Your job is NOT to be nice. Your job is to ensure scientific rigor. "
+        "You adhere to CONSORT (trials), SRQR (qualitative), and STROBE (observational) guidelines. "
+        "You focus on the 'Golden Thread': alignment of Gap -> Question -> Methods -> Results -> Discussion."
     )
     
     user_prompt = f"""
-    Here is the manuscript text (truncated to fit context if needed):
+    Here is a submitted manuscript:
     <manuscript>
     {text[:120000]}
     </manuscript>
 
-    PART 1: CRITICAL ANALYSIS
-    Perform a deep review. Focus on:
-    1. **The Gap**: Is it explicitly defined? Or is the intro generic?
-    2. **Methodology**: Is it reproducible? Does it match the research question? (Check Sample Size, Ethics, Analysis).
-    3. **Results**: Are they over-interpreted? Do they actually support the conclusion?
-    4. **The "Golden Thread"**: Does the logic flow seamlessly or is it disjointed?
-
-    PART 2: IDENTIFY VERIFICATION NEEDS
-    Identify 3-4 specific claims, references, or lack of similar studies that I need to verify externally.
+    Write a Critical Peer Review Report. Do not summarize the paper. Critique it.
     
-    OUTPUT FORMAT:
-    Provide a Python list of strings at the very end for verification, e.g., ["Citation check for Smith 2019", "Similar studies on VR in anatomy"]
-    """
-
-    message = client.messages.create(
-        model="claude-3-haiku-20240307",
-        max_tokens=2000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}]
-    )
-    return message.content[0].text, user_prompt
-
-def generate_final_report(initial_critique, evidence, original_text):
-    """
-    STAGE 2: THE SYNTHESIS.
-    Combines the deep critique with the external evidence found.
-    """
-    system_prompt = "You are the Editor-in-Chief. Compile the final decision letter."
+    Your Report must have these exact sections:
     
-    final_prompt = f"""
-    I have performed an initial critical analysis of the manuscript.
+    1. **The 'Golden Thread' Analysis**: 
+       - Does the Research Question directly address the Gap identified in the Intro?
+       - Do the Methods actually answer the Research Question?
+       - Does the Discussion link back to the Gap? (Point out any disjointed logic).
     
-    <initial_critique>
-    {initial_critique}
-    </initial_critique>
-
-    <external_evidence_found>
-    {evidence}
-    </external_evidence_found>
-
-    Now, rewrite the Final Peer Review Report. 
-    1. Integrate the external evidence into the critique (e.g., "The authors claim X is novel, but PubMed search reveals...").
-    2. Be specific about the flow of information and writing logic.
-    3. Provide a clear Recommendation (Accept/Reject/Revise).
-    4. List Actionable Changes.
+    2. **Methodological Rigor**:
+       - Critique the Sample Size (is it justified?).
+       - Critique the Analysis (is it appropriate?).
+       - Critique the Ethics/Reflexivity.
     
-    Style: rigorous, high-impact journal standard.
+    3. **HPE Context**:
+       - Is this relevant to Health Professions Education? 
+       - Does it cite recent (last 5 years) literature?
+    
+    4. **The Verdict**:
+       - List 3 Major Flaws that must be fixed.
+       - List 3 Minor Flaws.
+    
+    5. **Action Plan**:
+       - Concrete steps to improve the manuscript before submission.
     """
     
     message = client.messages.create(
         model="claude-3-haiku-20240307",
         max_tokens=4000,
         system=system_prompt,
-        messages=[{"role": "user", "content": final_prompt}]
+        messages=[{"role": "user", "content": user_prompt}]
     )
     return message.content[0].text
 
-# --- SIDEBAR ---
+# --- THE CO-AUTHOR BRAIN (CHAT) ---
+def chat_with_coauthor(prompt):
+    """
+    The chat is now an 'Improver'. It knows the critique and helps you fix the paper.
+    It can search PubMed if you ask.
+    """
+    # Check if user wants to search
+    tool_use = False
+    search_context = ""
+    
+    if "find" in prompt.lower() or "search" in prompt.lower() or "reference" in prompt.lower():
+        tool_use = True
+        with st.spinner("Searching PubMed/Web for evidence..."):
+            pubmed_res = search_pubmed(prompt)
+            search_context = f"\n[SYSTEM: External Evidence Found: {pubmed_res}]\n"
+
+    # Contextual Prompt
+    system_prompt = (
+        "You are a helpful Co-Author and Research Assistant. "
+        "You have read the manuscript and the Critical Review Report generated earlier. "
+        "Your goal is to help the user FIX the issues identified in the report. "
+        "If the user asks to rewrite a section, rewrite it to be academic, precise, and high-impact."
+    )
+    
+    # Inject the critique into the memory so the chat knows what to fix
+    context = f"""
+    <current_manuscript_context>
+    {st.session_state.full_text[:30000]}... (truncated)
+    </current_manuscript_context>
+
+    <critical_review_report>
+    {st.session_state.critique}
+    </critical_review_report>
+    
+    {search_context}
+    """
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Context: {context}\n\nUser Question: {prompt}"}
+    ]
+    
+    # We append previous chat history (excluding the massive context block to save tokens)
+    for msg in st.session_state.chat_history[-4:]: # Keep last 4 turns
+        if msg["role"] != "system":
+            messages.append(msg)
+
+    response = client.messages.create(
+        model="claude-3-haiku-20240307",
+        max_tokens=2000,
+        messages=messages
+    )
+    return response.content[0].text
+
+# --- UI LAYOUT ---
 with st.sidebar:
-    st.title("🧬 HPE Reviewer Pro")
-    st.caption("v2.1: Deep Logic + PubMed")
+    st.title("⚖️ HPE Expert V3")
+    st.markdown("Strict Logic Analysis + Co-Author Chat")
     uploaded_file = st.file_uploader("Upload Manuscript (PDF)", type="pdf")
-    if st.button("Reset"):
+    if st.button("Reset Analysis"):
         st.session_state.clear()
         st.rerun()
 
-# --- MAIN UI ---
+# --- MAIN APP ---
 if uploaded_file and not st.session_state.full_text:
     try:
         reader = PdfReader(uploaded_file)
         text = "".join([p.extract_text() for p in reader.pages])
         st.session_state.full_text = text
-        st.success(f"Manuscript Loaded: {len(text)} chars")
-    except Exception as e:
-        st.error(f"Error reading PDF: {e}")
+        st.success(f"Loaded {len(text)} characters. Ready for deep analysis.")
+    except: st.error("Error reading PDF.")
 
-if st.session_state.full_text and not st.session_state.analysis_report:
-    if st.button("🚀 Start Critical Analysis"):
-        status = st.status("🔍 Performing Expert Review...", expanded=True)
-        
-        # 1. Deep Read (Internal Logic)
-        status.write("🧠 Phase 1: Deep Reading & Logic Extraction (No Internet)...")
-        critique_draft, prompt_used = analyze_manuscript_logic(st.session_state.full_text)
-        
-        # 2. Extract Queries
-        try:
-            start = critique_draft.find('[')
-            end = critique_draft.rfind(']') + 1
-            queries = ast.literal_eval(critique_draft[start:end])
-        except:
-            queries = ["Medical education research methodology"]
-        
-        # 3. Search Evidence
-        status.write(f"🌐 Phase 2: Verifying claims via PubMed/Web ({len(queries)} items)...")
-        evidence_block = ""
-        for q in queries:
-            if isinstance(q, str):
-                pm_res = search_pubmed(q)
-                web_res = search_web(q)
-                evidence_block += f"### Checking: '{q}'\n- PubMed: {pm_res}\n- Web: {web_res}\n\n"
-        
-        st.session_state.evidence_context = evidence_block
-        
-        # 4. Final Synthesis
-        status.write("📝 Phase 3: Synthesizing Final Expert Report...")
-        final_report = generate_final_report(critique_draft, evidence_block, st.session_state.full_text)
-        
-        # Save to state
-        st.session_state.analysis_report = final_report
-        st.session_state.chat_history.append({"role": "user", "content": prompt_used}) # Context
-        st.session_state.chat_history.append({"role": "assistant", "content": critique_draft}) # Context
-        st.session_state.chat_history.append({"role": "assistant", "content": final_report}) # Result
-        
-        status.update(label="Review Complete", state="complete", expanded=False)
-        st.rerun()
+if st.session_state.full_text and not st.session_state.critique:
+    if st.button("🚀 Run Deep Critical Analysis (V1 Logic)"):
+        with st.spinner("🧠 Performing deep logical stress-test (no internet distraction)..."):
+            report = deep_critical_analysis(st.session_state.full_text)
+            st.session_state.critique = report
+            st.rerun()
 
-if st.session_state.analysis_report:
-    tab1, tab2 = st.tabs(["📝 Critical Review", "💬 Expert Chat"])
+if st.session_state.critique:
+    tab1, tab2 = st.tabs(["📝 Critical Report", "✍️ Co-Author Chat (Improve It)"])
     
     with tab1:
-        st.markdown(st.session_state.analysis_report)
-        st.download_button("Download Review", st.session_state.analysis_report, "Review.md")
-        with st.expander("View Evidence Gathered"):
-            st.code(st.session_state.evidence_context)
-            
-    with tab2:
-        st.info("The Chat is now aware of the full manuscript logic + external evidence found.")
+        st.warning("This report focuses on Logic, Flow, and Methodology Rigor.")
+        st.markdown(st.session_state.critique)
+        st.download_button("Download Report", st.session_state.critique, "Review.md")
         
+    with tab2:
+        st.info("💡 **Feature:** Ask me to *rewrite* the Introduction, *find* citations for a claim, or *fix* the logic gaps found in the report.")
+        
+        # Show chat interface
         for msg in st.session_state.chat_history:
-            if msg['role'] == 'user' and len(msg['content']) < 500: # Show only user chats
-                st.chat_message("user").markdown(msg["content"])
-            elif msg['role'] == 'assistant' and len(msg['content']) < 2000: # Show short answers
-                 # We skip the massive report to keep chat clean
-                 st.chat_message("assistant").markdown(msg["content"])
+             if msg.get("role") != "system":
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
-        if prompt := st.chat_input("Ask about logic, flow, or specific citations..."):
-            st.chat_message("user").markdown(prompt)
+        if prompt := st.chat_input("Ex: 'Rewrite the abstract to address the logic gap' or 'Find references for PBL'"):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"): st.markdown(prompt)
             
             with st.chat_message("assistant"):
-                # Decide if we need NEW evidence
-                check_prompt = f"User asked: '{prompt}'. Should I search PubMed again? Answer YES/NO."
-                check = client.messages.create(model="claude-3-haiku-20240307", max_tokens=10, messages=[{"role": "user", "content": check_prompt}]).content[0].text
-                
-                context_add = ""
-                if "YES" in check.upper():
-                    with st.spinner("Checking databases..."):
-                        pm = search_pubmed(prompt)
-                        context_add = f"\n[NEW SEARCH RESULTS]: {pm}\n"
-                
-                # Chat with full context
-                messages_for_api = st.session_state.chat_history.copy()
-                if context_add:
-                    messages_for_api.append({"role": "user", "content": f"(Context update: {context_add})"})
-
-                stream = client.messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=1024,
-                    messages=messages_for_api,
-                    stream=True
-                )
-                response = st.write_stream(chunk.delta.text for chunk in stream if chunk.type == "content_block_delta")
-                st.session_state.chat_history.append({"role": "assistant", "content": response})
+                response = chat_with_coauthor(prompt)
+                st.markdown(response)
+            
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
