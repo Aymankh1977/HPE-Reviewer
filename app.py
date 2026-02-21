@@ -1,139 +1,175 @@
 import streamlit as st
 import os
 import ast
-from dotenv import load_dotenv
+import requests
+import re
 from anthropic import Anthropic
 from pypdf import PdfReader
 from duckduckgo_search import DDGS
+import xml.etree.ElementTree as ET
 
-# --- Page Config ---
-st.set_page_config(
-    page_title="HPE Expert Reviewer",
-    page_icon="🧬",
-    layout="wide"
-)
+# --- CONFIGURATION ---
+st.set_page_config(page_title="HPE Expert Reviewer Pro", page_icon="🧬", layout="wide")
 
-# --- Load Environment Variables ---
-load_dotenv()
-env_key = os.getenv("ANTHROPIC_API_KEY")
+# --- SECURE KEY HANDLING ---
+try:
+    if "ANTHROPIC_API_KEY" in st.secrets:
+        api_key = st.secrets["ANTHROPIC_API_KEY"]
+    else:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+except FileNotFoundError:
+    api_key = os.getenv("ANTHROPIC_API_KEY")
 
-# --- Session State Management ---
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "full_text" not in st.session_state:
-    st.session_state.full_text = ""
-if "analysis_report" not in st.session_state:
-    st.session_state.analysis_report = ""
+if not api_key:
+    st.error("🚨 API Key missing! Please add ANTHROPIC_API_KEY to Streamlit Secrets.")
+    st.stop()
 
-# --- Sidebar ---
-with st.sidebar:
-    st.title("🧬 HPE Reviewer")
-    st.markdown("Automated expert peer review for *Medical Teacher*, *BMC Med Ed*, etc.")
-    
-    # API Key Handling
-    api_key = st.text_input("Anthropic API Key", value=env_key if env_key else "", type="password")
-    
-    uploaded_file = st.file_uploader("Upload Manuscript (PDF)", type="pdf")
-    
-    if st.button("Clear / Reset"):
-        st.session_state.chat_history = []
-        st.session_state.full_text = ""
-        st.session_state.analysis_report = ""
-        st.rerun()
+client = Anthropic(api_key=api_key)
 
-# --- Helper Functions ---
+# --- SESSION STATE ---
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
+if "full_text" not in st.session_state: st.session_state.full_text = ""
+if "analysis_report" not in st.session_state: st.session_state.analysis_report = ""
 
-def get_pdf_text(uploaded_file):
+# --- ADVANCED TOOLS ---
+
+def search_pubmed(query, max_results=3):
+    """Searches PubMed directly for medical/HPE literature."""
     try:
-        reader = PdfReader(uploaded_file)
-        text = ""
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
-        return text
-    except Exception as e:
-        st.error(f"Error reading PDF: {e}")
-        return None
+        # 1. Search for IDs
+        base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+        search_url = f"{base_url}/esearch.fcgi?db=pubmed&term={query}&retmode=json&retmax={max_results}"
+        resp = requests.get(search_url).json()
+        ids = resp.get("esearchresult", {}).get("idlist", [])
+        
+        if not ids:
+            return "No PubMed articles found."
 
-def search_evidence(query):
-    """Searches the web for evidence/citations."""
+        # 2. Get Summaries
+        ids_str = ",".join(ids)
+        summary_url = f"{base_url}/esummary.fcgi?db=pubmed&id={ids_str}&retmode=json"
+        summary_resp = requests.get(summary_url).json()
+        
+        results = []
+        for uid in ids:
+            item = summary_resp.get("result", {}).get(uid, {})
+            title = item.get("title", "No title")
+            source = item.get("source", "Unknown Source")
+            pubdate = item.get("pubdate", "No date")
+            results.append(f"- **{title}** ({source}, {pubdate})")
+            
+        return "\n".join(results)
+    except Exception as e:
+        return f"PubMed Error: {e}"
+
+def search_web(query):
+    """Fallback to DuckDuckGo for general queries."""
     try:
         results = DDGS().text(query, max_results=3)
         if results:
-            summary = "\n".join([f"- {r['title']}: {r['body']} (Source: {r['href']})" for r in results])
-            return summary
-        return "No results found."
-    except Exception as e:
-        return "Search unavailable."
+            return "\n".join([f"- {r['title']}: {r['body']} (Source: {r['href']})" for r in results])
+        return "No web results found."
+    except:
+        return "Web search unavailable."
 
-def analyze_manuscript(client, text):
-    status = st.status("🔍 Analyzing Manuscript...", expanded=True)
+def check_citation_validity(citation_text):
+    """Uses PubMed to check if a specific citation string likely exists."""
+    # Strip year and brackets to get a clean query
+    clean_query = re.sub(r'[^\w\s]', '', citation_text)[:100] # Limit length
+    return search_pubmed(clean_query, max_results=1)
+
+def analyze_manuscript(text):
+    status = st.status("🔍 Starting Deep Analysis...", expanded=True)
     
-    # Phase 1: Scan
-    status.write("🧠 Phase 1: Critical Scan & Identifying Gaps...")
+    # --- PHASE 1: Structure & Logic Scan ---
+    status.write("🧠 Phase 1: Analyzing Logic, Flow, and Manuscript Structure...")
+    
     system_prompt = (
-        "You are a senior academic editor for high-impact journals like 'Medical Teacher' and 'BMC Medical Education'. "
-        "You are critical, precise, and constructive."
+        "You are an expert reviewer for top-tier journals like 'Medical Teacher'. "
+        "You focus on 'Constructive Alignment' and the 'Golden Thread' of logic. "
+        "You are skeptical of claims without evidence."
     )
-    
-    prompt_phase1 = f"""
-    Here is a submitted manuscript:
+
+    prompt_scan = f"""
+    Analyze this manuscript (Text limited to 100k chars):
     <manuscript>
-    {text[:100000]} 
+    {text[:100000]}
     </manuscript>
 
-    Analyze for: Research Question, Methodology Rigor, and Alignment with HPE literature.
-    OUTPUT REQUIREMENT: Identify 3 specific claims/methods needing verification.
-    Format ONLY as a Python list of strings, e.g., ["latest citation for PBL", "sample size guidelines"]
+    Task 1: Evaluate the LOGIC and STRUCTURE. 
+    - Does the Introduction end with a clear gap?
+    - Do the Methods directly answer the Research Question?
+    - Are the Results presented without interpretation?
+    - Does the Discussion link back to the gap?
+
+    Task 2: Identify 3 specific references or claims that look suspicious or outdated.
+    
+    Output Format: ONLY a Python list of strings for Task 2, e.g., ["Effectiveness of PBL 2005", "Smith et al 2019 data"]
     """
     
     msg1 = client.messages.create(
-        model="claude-3-haiku-20240307",
-        max_tokens=1024,
+        model="claude-3-haiku-20240307", 
+        max_tokens=1024, 
         system=system_prompt,
-        messages=[{"role": "user", "content": prompt_phase1}]
+        messages=[{"role": "user", "content": prompt_scan}]
     )
     
-    # Parse queries
+    # Extract Queries for Verification
     try:
-        raw_resp = msg1.content[0].text
-        start = raw_resp.find('[')
-        end = raw_resp.find(']') + 1
-        queries = ast.literal_eval(raw_resp[start:end])
+        raw_text = msg1.content[0].text
+        start = raw_text.find('[')
+        end = raw_text.find(']') + 1
+        queries = ast.literal_eval(raw_text[start:end])
     except:
-        queries = ["Health professions education research standards"]
+        queries = ["Medical education research trends"]
 
-    # Phase 2: Search
-    status.write(f"🌐 Phase 2: Searching Evidence for: {queries}")
-    search_context = ""
+    # --- PHASE 2: Multi-Source Verification ---
+    status.write(f"🌐 Phase 2: Verifying claims via PubMed & Web ({len(queries)} checks)...")
+    
+    evidence_block = ""
     for q in queries:
-        if isinstance(q, str):
-            res = search_evidence(q)
-            search_context += f"Query: {q}\nResults:\n{res}\n\n"
+        pubmed_res = search_pubmed(q)
+        web_res = search_web(q)
+        evidence_block += f"### Checking Claim/Ref: '{q}'\n**PubMed found:**\n{pubmed_res}\n**Web found:**\n{web_res}\n\n"
 
-    # Phase 3: Report
-    status.write("📝 Phase 3: Drafting Expert Report...")
+    # --- PHASE 3: Similar Papers ---
+    status.write("📚 Phase 3: finding similar recent publications in HPE...")
+    # Generate a keyword search based on the first query extracted
+    similar_papers = search_pubmed(f"{queries[0]} review", max_results=4)
+
+    # --- PHASE 4: Final Report ---
+    status.write("📝 Phase 4: Compiling Expert Reviewer Report...")
+    
     final_prompt = f"""
-    Manuscript analyzed. External evidence found:
-    <evidence>
-    {search_context}
-    </evidence>
+    You are the Editor-in-Chief. Write a robust Peer Review Report.
+    
+    INPUT DATA:
+    1. Manuscript Text (already provided in context).
+    2. Verification Evidence: 
+    {evidence_block}
+    3. Similar/Recent Papers found in PubMed:
+    {similar_papers}
 
-    Generate a formal Peer Review Report. Structure:
-    1. **Overview & Recommendation** (Accept/Revise/Reject)
-    2. **Strengths**
-    3. **Major Weaknesses** (Methodology, Ethics, Analysis)
-    4. **Specific Comments** (Intro, Methods, Results, Discussion)
-    5. **Missing Citations/Evidence** (Use the evidence provided)
-    6. **Actionable Recommendations**
+    REPORT SECTIONS:
+    1. **Executive Summary & Decision**: (Accept, Minor, Major, Reject).
+    2. **Structure & Logic Check**: 
+       - Critique the "Golden Thread" (Coherence from Intro to Conclusion).
+       - Comment on the "Gap" identification.
+    3. **Methodological Rigor**: 
+       - Check against CONSORT (if quantitative) or SRQR (if qualitative).
+    4. **Reference Quality & Validity**:
+       - Discuss if citations are current (last 5 years).
+       - Note any potential "hallucinated" or incorrect citations based on the evidence check.
+    5. **Similar Work**: 
+       - Mention the similar papers found ({similar_papers}) and how this manuscript compares.
+    6. **Specific Recommendations**: Bullet points.
 
-    Tone: Professional, supportive, rigorous.
+    Tone: Strict, Academic, Helpful.
     """
     
-    # Save context for chat
-    st.session_state.chat_history.append({"role": "user", "content": prompt_phase1})
-    st.session_state.chat_history.append({"role": "assistant", "content": raw_resp})
+    # Maintain context
+    st.session_state.chat_history.append({"role": "user", "content": prompt_scan})
+    st.session_state.chat_history.append({"role": "assistant", "content": raw_text})
     st.session_state.chat_history.append({"role": "user", "content": final_prompt})
 
     final_msg = client.messages.create(
@@ -143,87 +179,89 @@ def analyze_manuscript(client, text):
         messages=st.session_state.chat_history
     )
     
-    report_text = final_msg.content[0].text
+    report = final_msg.content[0].text
+    st.session_state.chat_history.append({"role": "assistant", "content": report})
     
-    # Save final response to history
-    st.session_state.chat_history.append({"role": "assistant", "content": report_text})
+    status.update(label="Analysis Complete!", state="complete", expanded=False)
+    return report
+
+# --- SIDEBAR ---
+with st.sidebar:
+    st.title("🧬 HPE Reviewer Pro")
+    st.markdown("Connected to **PubMed** & **Web**")
     
-    status.update(label="✅ Analysis Complete!", state="complete", expanded=False)
-    return report_text
-
-# --- Main App Logic ---
-
-if not api_key:
-    st.warning("Please enter your Anthropic API Key in the sidebar to proceed.")
-    st.stop()
-
-client = Anthropic(api_key=api_key)
-
-st.title("📄 AI Scientific Reviewer")
-st.caption("Powered by Claude 3 Haiku & DuckDuckGo Search")
-
-# 1. File Upload & Processing
-if uploaded_file and not st.session_state.full_text:
-    text = get_pdf_text(uploaded_file)
-    if text:
-        st.session_state.full_text = text
-        st.success(f"PDF Loaded: {len(text)} characters.")
-
-# 2. Run Analysis Button
-if st.session_state.full_text and not st.session_state.analysis_report:
-    if st.button("🚀 Start Expert Analysis"):
-        report = analyze_manuscript(client, st.session_state.full_text)
-        st.session_state.analysis_report = report
+    uploaded_file = st.file_uploader("Upload Manuscript (PDF)", type="pdf")
+    if st.button("Reset System"):
+        st.session_state.chat_history = []
+        st.session_state.full_text = ""
+        st.session_state.analysis_report = ""
         st.rerun()
 
-# 3. Display Report & Chat
+# --- MAIN PAGE ---
+if uploaded_file and not st.session_state.full_text:
+    try:
+        reader = PdfReader(uploaded_file)
+        text = "".join([p.extract_text() for p in reader.pages])
+        st.session_state.full_text = text
+        st.success(f"Manuscript Loaded: {len(text)} chars")
+    except Exception as e:
+        st.error(f"Error reading PDF: {e}")
+
+if st.session_state.full_text and not st.session_state.analysis_report:
+    if st.button("🚀 Start Deep Analysis"):
+        st.session_state.analysis_report = analyze_manuscript(st.session_state.full_text)
+        st.rerun()
+
 if st.session_state.analysis_report:
-    tab1, tab2 = st.tabs(["📝 Review Report", "💬 Chat with Manuscript"])
+    tab1, tab2 = st.tabs(["📝 Expert Report", "💬 Internet-Enabled Chat"])
     
     with tab1:
         st.markdown(st.session_state.analysis_report)
-        st.download_button(
-            label="Download Report",
-            data=st.session_state.analysis_report,
-            file_name="Review_Report.md",
-            mime="text/markdown"
-        )
+        st.download_button("Download Report", st.session_state.analysis_report, "Review.md")
     
     with tab2:
-        st.markdown("### Ask follow-up questions about the paper")
+        st.info("💡 The chat now has access to PubMed and the Web. Ask it to 'check this reference' or 'find similar papers'.")
         
-        # Display chat history (filtering out the hidden system logic for cleaner view)
+        # Display chat (filtered)
         for msg in st.session_state.chat_history:
-            # We skip the very long prompt injections and large responses to keep chat clean
-            if len(msg['content']) < 2000:
+            if len(msg['content']) < 3000: # Hide massive prompts
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
-
-        # Simple chat interface
-        if prompt := st.chat_input("Ask about methodology, stats, or specific sections..."):
+        
+        if prompt := st.chat_input("Ask about the paper or search for info..."):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
+            st.chat_message("user").markdown(prompt)
+            
+            # --- INTELLIGENT CHAT AGENT ---
             with st.chat_message("assistant"):
-                # Create the stream
+                # 1. Decide if we need to search
+                tool_check_prompt = f"User asked: '{prompt}'. Should I search PubMed or the Web? Answer YES or NO."
+                check = client.messages.create(
+                    model="claude-3-haiku-20240307", max_tokens=10, 
+                    messages=[{"role": "user", "content": tool_check_prompt}]
+                ).content[0].text
+                
+                context_add = ""
+                if "YES" in check.upper():
+                    with st.spinner("Searching external databases..."):
+                        pm_res = search_pubmed(prompt)
+                        web_res = search_web(prompt)
+                        context_add = f"\n[SYSTEM: I performed a live search based on the user question.]\nPubMed Results: {pm_res}\nWeb Results: {web_res}\n"
+                
+                # 2. Generate Answer
+                final_chat_prompt = prompt + context_add
+                
+                # We don't append the context to history permanently to save tokens, just for this turn
+                temp_messages = st.session_state.chat_history.copy()
+                if context_add:
+                    temp_messages[-1]['content'] = final_chat_prompt
+
                 stream = client.messages.create(
                     model="claude-3-haiku-20240307",
                     max_tokens=1024,
-                    messages=st.session_state.chat_history,
+                    messages=temp_messages,
                     stream=True
                 )
+                response = st.write_stream(chunk.delta.text for chunk in stream if chunk.type == "content_block_delta")
                 
-                # Generator function to pull ONLY text from the stream
-                def text_generator():
-                    for event in stream:
-                        if event.type == "content_block_delta":
-                            yield event.delta.text
-
-                response = st.write_stream(text_generator)
-            
             st.session_state.chat_history.append({"role": "assistant", "content": response})
-
-else:
-    if not uploaded_file:
-        st.info("👈 Upload a PDF manuscript in the sidebar to begin.")

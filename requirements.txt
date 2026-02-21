@@ -3,3 +3,5 @@ anthropic
 pypdf
 duckduckgo-search
 python-dotenv
+requests
+beautifulsoup4
