@@ -13,8 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- SECURE API KEY HANDLING ---
-# This looks for the key in Streamlit Cloud Secrets OR local .env file
+# --- SECURE KEY HANDLING ---
 try:
     if "ANTHROPIC_API_KEY" in st.secrets:
         api_key = st.secrets["ANTHROPIC_API_KEY"]
@@ -44,7 +43,7 @@ with st.sidebar:
     st.title("🧬 HPE Reviewer")
     st.markdown("Automated expert peer review for *Medical Teacher*, *BMC Med Ed*, etc.")
     
-    # NO API KEY INPUT HERE (Secure Mode)
+    # NO API KEY INPUT HERE
     
     uploaded_file = st.file_uploader("Upload Manuscript (PDF)", type="pdf")
     
@@ -165,9 +164,6 @@ def analyze_manuscript(client, text):
     return report_text
 
 # --- Main App Logic ---
-
-st.title("📄 AI Scientific Reviewer")
-st.caption("Powered by Claude 3 Haiku & DuckDuckGo Search")
 
 # 1. File Upload & Processing
 if uploaded_file and not st.session_state.full_text:
