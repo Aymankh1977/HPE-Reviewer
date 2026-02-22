@@ -3,3 +3,4 @@ anthropic
 pypdf
 duckduckgo-search
 python-dotenv
+python-docx
