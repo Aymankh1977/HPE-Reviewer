@@ -69,16 +69,22 @@ def get_pdf_text(uploaded_file):
         return None
 
 def create_docx(report_text):
-    """Converts the report text into a Word Document byte stream."""
+    """Generates a Word Document from the markdown text."""
     doc = Document()
     doc.add_heading('HPE Expert Review Report', 0)
     
-    # Split text by lines to handle basic formatting
+    # We split by lines to handle basic bolding/headings in the Word doc
     for line in report_text.split('\n'):
-        if line.startswith('###') or line.startswith('**'):
-            doc.add_heading(line.replace('#', '').replace('*', '').strip(), level=2)
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('###') or line.startswith('**') and len(line) < 50:
+            # Treat as a subheading
+            clean_line = line.replace('#', '').replace('*', '').strip()
+            doc.add_heading(clean_line, level=2)
         else:
-            doc.add_paragraph(line)
+            # Standard paragraph
+            p = doc.add_paragraph(line)
             
     bio = BytesIO()
     doc.save(bio)
@@ -159,6 +165,7 @@ def analyze_manuscript(client, text):
     Tone: Professional, supportive, rigorous.
     """
     
+    # Save context for chat
     st.session_state.chat_history.append({"role": "user", "content": prompt_phase1})
     st.session_state.chat_history.append({"role": "assistant", "content": raw_resp})
     st.session_state.chat_history.append({"role": "user", "content": final_prompt})
@@ -171,6 +178,8 @@ def analyze_manuscript(client, text):
     )
     
     report_text = final_msg.content[0].text
+    
+    # Save final response to history
     st.session_state.chat_history.append({"role": "assistant", "content": report_text})
     
     status.update(label="✅ Analysis Complete!", state="complete", expanded=False)
@@ -199,28 +208,33 @@ if st.session_state.analysis_report:
     with tab1:
         st.markdown(st.session_state.analysis_report)
         
-        # --- WORD DOWNLOAD BUTTON ---
-        docx_data = create_docx(st.session_state.analysis_report)
+        # --- DOCX DOWNLOADER ---
+        docx_file = create_docx(st.session_state.analysis_report)
         st.download_button(
-            label="📄 Download Report (Word Doc)",
-            data=docx_data,
+            label="📄 Download Report (Word)",
+            data=docx_file,
             file_name="Review_Report.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
     
     with tab2:
         st.markdown("### Ask follow-up questions about the paper")
+        
+        # Display chat history (filtering out the hidden system logic for cleaner view)
         for msg in st.session_state.chat_history:
+            # We skip the very long prompt injections and large responses to keep chat clean
             if len(msg['content']) < 2000:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
+        # Simple chat interface
         if prompt := st.chat_input("Ask about methodology, stats, or specific sections..."):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
             with st.chat_message("assistant"):
+                # Create the stream
                 stream = client.messages.create(
                     model="claude-3-haiku-20240307",
                     max_tokens=1024,
@@ -228,6 +242,7 @@ if st.session_state.analysis_report:
                     stream=True
                 )
                 
+                # Generator function to pull ONLY text from the stream
                 def text_generator():
                     for event in stream:
                         if event.type == "content_block_delta":
