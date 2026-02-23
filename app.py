@@ -26,8 +26,7 @@ if not api_key:
     st.error("🚨 Configuration Error: ANTHROPIC_API_KEY is missing. Please add it to Streamlit Secrets.")
     st.stop()
 
-# --- MODEL SELECTION ---
-# Switch to "claude-3-sonnet-20240229" for higher intelligence if budget allows.
+# --- MODEL CONFIG ---
 MODEL_NAME = "claude-3-haiku-20240307" 
 client = Anthropic(api_key=api_key)
 
@@ -75,7 +74,6 @@ def analyze_manuscript(text):
     # 1. THE "DEEP READ" & EVIDENCE GATHERING
     status.write("🧠 Phase 1: Identifying key claims for verification...")
     
-    # We ask the model to extract searchable claims FIRST.
     scan_prompt = f"""
     Read this manuscript text:
     {text[:80000]}
@@ -153,17 +151,12 @@ def analyze_manuscript(text):
     Tone: High-level Academic.
     """
     
-    # Save context
-    st.session_state.chat_history.append({"role": "user", "content": final_prompt}) # Hidden logic prompt
-    
     final_msg = client.messages.create(
         model=MODEL_NAME, max_tokens=4000, system=system_prompt,
         messages=[{"role": "user", "content": final_prompt}]
     )
     
     report = final_msg.content[0].text
-    st.session_state.chat_history.append({"role": "assistant", "content": report})
-    
     status.update(label="Analysis Complete", state="complete", expanded=False)
     return report
 
@@ -197,28 +190,47 @@ if st.session_state.analysis_report:
     
     with tab2:
         st.markdown("### Ask follow-up questions")
+        
+        # Display clean history
         for msg in st.session_state.chat_history:
-            if msg['role'] != 'user' or "MANUSCRIPT TEXT" not in msg['content']: # Hide huge prompts
-                 if len(msg['content']) < 3000:
-                    st.chat_message(msg["role"]).markdown(msg["content"])
+             st.chat_message(msg["role"]).markdown(msg["content"])
         
         if prompt := st.chat_input("Ex: 'Rewrite the abstract to fix the logic gap'"):
             st.chat_message("user").markdown(prompt)
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             
             with st.chat_message("assistant"):
-                # Chat logic: Feed context + prompt
-                msgs = [
-                    {"role": "system", "content": "You are a co-author helping fix the paper based on the review."},
-                    {"role": "user", "content": f"Manuscript: {st.session_state.full_text[:30000]}..."},
-                    {"role": "assistant", "content": st.session_state.analysis_report}
-                ]
-                msgs.append({"role": "user", "content": prompt})
+                # --- FIXED CHAT LOGIC ---
+                # 1. System prompt goes in 'system' param, not messages list.
+                chat_system_prompt = "You are a co-author helping fix the paper based on the review. Be academic and precise."
                 
+                # 2. Construct context messages correctly (User -> Assistant -> User)
+                # We seed the context as the first interaction
+                msgs = [
+                    {
+                        "role": "user", 
+                        "content": f"Here is the manuscript context (truncated):\n{st.session_state.full_text[:30000]}\n\nAnd here is the critique report:\n{st.session_state.analysis_report}"
+                    },
+                    {
+                        "role": "assistant", 
+                        "content": "I have read the manuscript and the critique. I am ready to help you improve the paper."
+                    }
+                ]
+                
+                # 3. Append the actual conversation history
+                for m in st.session_state.chat_history:
+                    msgs.append(m)
+                
+                # 4. API Call
                 stream = client.messages.create(
-                    model=MODEL_NAME, max_tokens=2000, messages=msgs, stream=True
+                    model=MODEL_NAME, 
+                    max_tokens=2000, 
+                    system=chat_system_prompt, # SYSTEM PROMPT HERE
+                    messages=msgs, 
+                    stream=True
                 )
                 response = st.write_stream(chunk.delta.text for chunk in stream if chunk.type == "content_block_delta")
+            
             st.session_state.chat_history.append({"role": "assistant", "content": response})
 else:
     if not uploaded_file: st.info("👈 Upload PDF to start.")
