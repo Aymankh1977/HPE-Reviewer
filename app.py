@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import ast
+import datetime
 from io import BytesIO
 from docx import Document
 from dotenv import load_dotenv
@@ -10,8 +11,8 @@ from duckduckgo_search import DDGS
 
 # --- Page Config ---
 st.set_page_config(
-    page_title="HPE Expert Reviewer",
-    page_icon="🧬",
+    page_title="HPE Expert Reviewer (Forensic)",
+    page_icon="🔎",
     layout="wide"
 )
 
@@ -32,21 +33,16 @@ if not api_key:
 
 client = Anthropic(api_key=api_key)
 
-# --- Session State Management ---
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "full_text" not in st.session_state:
-    st.session_state.full_text = ""
-if "analysis_report" not in st.session_state:
-    st.session_state.analysis_report = ""
+# --- Session State ---
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
+if "full_text" not in st.session_state: st.session_state.full_text = ""
+if "analysis_report" not in st.session_state: st.session_state.analysis_report = ""
 
 # --- Sidebar ---
 with st.sidebar:
-    st.title("🧬 HPE Reviewer")
-    st.markdown("Automated expert peer review for *Medical Teacher*, *BMC Med Ed*, etc.")
-    
+    st.title("🔎 HPE Reviewer Plus")
+    st.markdown("Forensic Analysis & Expert Review")
     uploaded_file = st.file_uploader("Upload Manuscript (PDF)", type="pdf")
-    
     if st.button("Clear / Reset"):
         st.session_state.chat_history = []
         st.session_state.full_text = ""
@@ -55,71 +51,72 @@ with st.sidebar:
 
 # --- Helper Functions ---
 
-def get_pdf_text(uploaded_file):
+def get_pdf_text_with_pages(uploaded_file):
+    """Extracts text but inserts [Page X] markers for specific referencing."""
     try:
         reader = PdfReader(uploaded_file)
         text = ""
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+        for i, page in enumerate(reader.pages):
+            content = page.extract_text()
+            if content:
+                # Inject page marker
+                text += f"\n\n--- [Page {i+1}] ---\n\n{content}"
         return text
     except Exception as e:
         st.error(f"Error reading PDF: {e}")
         return None
 
 def create_docx(report_text):
-    """Generates a Word Document from the markdown text."""
     doc = Document()
     doc.add_heading('HPE Expert Review Report', 0)
-    
-    # We split by lines to handle basic bolding/headings in the Word doc
     for line in report_text.split('\n'):
         line = line.strip()
-        if not line:
-            continue
-        if line.startswith('###') or line.startswith('**') and len(line) < 50:
-            # Treat as a subheading
-            clean_line = line.replace('#', '').replace('*', '').strip()
-            doc.add_heading(clean_line, level=2)
+        if not line: continue
+        if line.startswith('###') or line.startswith('**') and len(line) < 60:
+            doc.add_heading(line.replace('#', '').replace('*', '').strip(), level=2)
         else:
-            # Standard paragraph
-            p = doc.add_paragraph(line)
-            
+            doc.add_paragraph(line)
     bio = BytesIO()
     doc.save(bio)
     return bio.getvalue()
 
 def search_evidence(query):
-    """Searches the web for evidence/citations."""
     try:
         results = DDGS().text(query, max_results=3)
         if results:
-            summary = "\n".join([f"- {r['title']}: {r['body']} (Source: {r['href']})" for r in results])
-            return summary
+            return "\n".join([f"- {r['title']}: {r['body']} (Source: {r['href']})" for r in results])
         return "No results found."
-    except Exception as e:
-        return "Search unavailable."
+    except: return "Search unavailable."
 
 def analyze_manuscript(client, text):
-    status = st.status("🔍 Analyzing Manuscript...", expanded=True)
+    status = st.status("🔍 Starting Forensic Analysis...", expanded=True)
     
-    # Phase 1: Scan
-    status.write("🧠 Phase 1: Critical Scan & Identifying Gaps...")
+    # --- PHASE 1: FORENSIC SCAN ---
+    status.write("🧠 Phase 1: Scanning for Logic, Dates, and Technical Accuracy...")
+    
+    current_year = datetime.datetime.now().year
+    
     system_prompt = (
-        "You are a senior academic editor for high-impact journals like 'Medical Teacher' and 'BMC Medical Education'. "
-        "You are critical, precise, and constructive."
+        "You are an expert, detail-oriented peer reviewer for top medical education journals. "
+        "You verify facts, check consistency, and act as a forensic editor."
     )
     
+    # This prompt is designed to catch the specific errors you mentioned
     prompt_phase1 = f"""
-    Here is a submitted manuscript:
+    Analyze this manuscript text (with Page markers included):
     <manuscript>
-    {text[:100000]} 
+    {text[:120000]} 
     </manuscript>
 
-    Analyze for: Research Question, Methodology Rigor, and Alignment with HPE literature.
-    OUTPUT REQUIREMENT: Identify 3 specific claims/methods needing verification.
-    Format ONLY as a Python list of strings, e.g., ["latest citation for PBL", "sample size guidelines"]
+    You must perform a 'Sanity Check' and 'Consistency Scan'.
+    
+    TASK: Identify specific items that need external verification. Look for:
+    1. **Temporal Logic**: Are there dates in the future (e.g., > {current_year})? Are citations newer than the study date?
+    2. **Technical Accuracy**: Check for non-existent technologies (e.g., 'GPT-5', 'iPhone 20') or made-up statistics.
+    3. **Methodological Citations**: Are the methods referenced correctly?
+    
+    OUTPUT: A Python list of strings for items to search/verify.
+    Example: ["Release date of GPT-5", "Current date vs Manuscript date 2026", "Citation check for Smith 2024"]
     """
     
     msg1 = client.messages.create(
@@ -129,45 +126,58 @@ def analyze_manuscript(client, text):
         messages=[{"role": "user", "content": prompt_phase1}]
     )
     
-    # Parse queries
     try:
-        raw_resp = msg1.content[0].text
-        start = raw_resp.find('[')
-        end = raw_resp.find(']') + 1
-        queries = ast.literal_eval(raw_resp[start:end])
+        raw = msg1.content[0].text
+        start, end = raw.find('['), raw.rfind(']') + 1
+        queries = ast.literal_eval(raw[start:end])
     except:
-        queries = ["Health professions education research standards"]
+        queries = ["Current trends in medical education", "GPT-4 release date"]
 
-    # Phase 2: Search
-    status.write(f"🌐 Phase 2: Searching Evidence for: {queries}")
-    search_context = ""
+    # --- PHASE 2: EVIDENCE GATHERING ---
+    status.write(f"🌐 Phase 2: Fact-Checking {len(queries)} specific claims...")
+    evidence = ""
     for q in queries:
         if isinstance(q, str):
             res = search_evidence(q)
-            search_context += f"Query: {q}\nResults:\n{res}\n\n"
+            evidence += f"Claim/Query: {q}\nResult: {res}\n\n"
 
-    # Phase 3: Report
-    status.write("📝 Phase 3: Drafting Expert Report...")
+    # --- PHASE 3: DEEP REPORT GENERATION ---
+    status.write("📝 Phase 3: Writing Comprehensive Expert Report...")
+    
     final_prompt = f"""
-    Manuscript analyzed. External evidence found:
-    <evidence>
-    {search_context}
-    </evidence>
+    You are the Senior Editor. Write a detailed Peer Review Report based on the manuscript and the fact-check evidence below.
+    
+    <fact_check_evidence>
+    {evidence}
+    </fact_check_evidence>
 
-    Generate a formal Peer Review Report. Structure:
-    1. **Overview & Recommendation** (Accept/Revise/Reject)
-    2. **Strengths**
-    3. **Major Weaknesses** (Methodology, Ethics, Analysis)
-    4. **Specific Comments** (Intro, Methods, Results, Discussion)
-    5. **Missing Citations/Evidence** (Use the evidence provided)
-    6. **Actionable Recommendations**
+    **CRITICAL INSTRUCTIONS:**
+    1. **Accuracy**: If the author mentions "GPT-5" or future dates like "2026", FLAGGED IT as a major error based on the evidence.
+    2. **Content Comprehension**: Do not say "No results found" if the results are just unstructured. Look for *implied* results in the text.
+    3. **Specificity**: Quote specific [Page X] numbers when pointing out errors.
+    
+    **REPORT STRUCTURE:**
+    
+    1. **Executive Summary**: (Accept, Minor, Major, Reject). Balance strengths and weaknesses.
+    2. **Forensic Sanity Check** (New Section):
+       - **Temporal Logic**: Flag date inconsistencies (e.g., submission date vs search dates).
+       - **Technical Accuracy**: Flag non-existent models/tools.
+    3. **Internal Consistency**:
+       - Do the Results match the Methods?
+       - Does the Abstract match the Conclusion?
+    4. **Methodological Critique**:
+       - Sample size, Ethics, Data analysis.
+    5. **Specific Comments (Line-by-Line)**:
+       - Use [Page X] references.
+       - Point out missing citations or logical gaps.
+    6. **Constructive Recommendations**:
+       - Be specific. (e.g., "Add a Table comparing X and Y", "Rename section Z to...").
 
-    Tone: Professional, supportive, rigorous.
+    Tone: Rigorous, Academic, Constructive.
     """
     
-    # Save context for chat
     st.session_state.chat_history.append({"role": "user", "content": prompt_phase1})
-    st.session_state.chat_history.append({"role": "assistant", "content": raw_resp})
+    st.session_state.chat_history.append({"role": "assistant", "content": raw})
     st.session_state.chat_history.append({"role": "user", "content": final_prompt})
 
     final_msg = client.messages.create(
@@ -177,81 +187,58 @@ def analyze_manuscript(client, text):
         messages=st.session_state.chat_history
     )
     
-    report_text = final_msg.content[0].text
-    
-    # Save final response to history
-    st.session_state.chat_history.append({"role": "assistant", "content": report_text})
-    
-    status.update(label="✅ Analysis Complete!", state="complete", expanded=False)
-    return report_text
+    report = final_msg.content[0].text
+    st.session_state.chat_history.append({"role": "assistant", "content": report})
+    status.update(label="✅ Review Complete!", state="complete", expanded=False)
+    return report
 
-# --- Main App Logic ---
+# --- Main App ---
 
-# 1. File Upload & Processing
 if uploaded_file and not st.session_state.full_text:
-    text = get_pdf_text(uploaded_file)
+    text = get_pdf_text_with_pages(uploaded_file)
     if text:
         st.session_state.full_text = text
-        st.success(f"PDF Loaded: {len(text)} characters.")
+        st.success(f"PDF Loaded with Page Markers: {len(text)} chars.")
 
-# 2. Run Analysis Button
 if st.session_state.full_text and not st.session_state.analysis_report:
-    if st.button("🚀 Start Expert Analysis"):
+    if st.button("🚀 Start Forensic Analysis"):
         report = analyze_manuscript(client, st.session_state.full_text)
         st.session_state.analysis_report = report
         st.rerun()
 
-# 3. Display Report & Chat
 if st.session_state.analysis_report:
-    tab1, tab2 = st.tabs(["📝 Review Report", "💬 Chat with Manuscript"])
+    tab1, tab2 = st.tabs(["📝 Forensic Report", "💬 Expert Chat"])
     
     with tab1:
         st.markdown(st.session_state.analysis_report)
-        
-        # --- DOCX DOWNLOADER ---
-        docx_file = create_docx(st.session_state.analysis_report)
-        st.download_button(
-            label="📄 Download Report (Word)",
-            data=docx_file,
-            file_name="Review_Report.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+        docx = create_docx(st.session_state.analysis_report)
+        st.download_button("Download Report (Word)", docx, "Review_Report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     
     with tab2:
-        st.markdown("### Ask follow-up questions about the paper")
-        
-        # Display chat history (filtering out the hidden system logic for cleaner view)
+        st.markdown("### Ask follow-up questions")
         for msg in st.session_state.chat_history:
-            # We skip the very long prompt injections and large responses to keep chat clean
             if len(msg['content']) < 2000:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
-        # Simple chat interface
-        if prompt := st.chat_input("Ask about methodology, stats, or specific sections..."):
+        if prompt := st.chat_input("Ask about specific page errors or citations..."):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
             with st.chat_message("assistant"):
-                # Create the stream
                 stream = client.messages.create(
                     model="claude-3-haiku-20240307",
                     max_tokens=1024,
                     messages=st.session_state.chat_history,
                     stream=True
                 )
-                
-                # Generator function to pull ONLY text from the stream
-                def text_generator():
+                def generator():
                     for event in stream:
-                        if event.type == "content_block_delta":
-                            yield event.delta.text
-
-                response = st.write_stream(text_generator)
-            
+                        if event.type == "content_block_delta": yield event.delta.text
+                response = st.write_stream(generator)
             st.session_state.chat_history.append({"role": "assistant", "content": response})
 
 else:
     if not uploaded_file:
-        st.info("👈 Upload a PDF manuscript in the sidebar to begin.")
+        st.info("👈 Upload PDF to begin.")
