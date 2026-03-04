@@ -7,7 +7,7 @@ from anthropic import Anthropic
 from pypdf import PdfReader
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="HPE Expert Reviewer (Sonnet Edition)", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="HPE Expert Reviewer (Sonnet)", page_icon="🎓", layout="wide")
 
 # --- SECURE KEY HANDLING ---
 try:
@@ -24,9 +24,10 @@ if not api_key:
     st.error("🚨 Configuration Error: ANTHROPIC_API_KEY is missing. Please add it to Streamlit Secrets.")
     st.stop()
 
-# --- CRITICAL CHANGE: USING INTELLIGENT MODEL ---
-# Switched from Haiku to Sonnet 3.5 for expert reasoning and citation checking
-MODEL_NAME = "claude-3-5-sonnet-20240620"
+# --- MODEL CONFIGURATION ---
+# We are using Claude 3 Sonnet (Balanced Expert)
+# This is much smarter than Haiku but widely available.
+MODEL_NAME = "claude-3-sonnet-20240229"
 client = Anthropic(api_key=api_key)
 
 # --- SESSION STATE ---
@@ -62,7 +63,7 @@ def create_docx(report_text):
 
 # --- CORE ANALYSIS LOGIC ---
 def analyze_manuscript(text):
-    status = st.status("🔍 Starting Expert Analysis (Claude 3.5 Sonnet)...", expanded=True)
+    status = st.status("🔍 Starting Expert Analysis (Claude 3 Sonnet)...", expanded=True)
     
     # --- STEP 1: CITATION AUDIT ---
     status.write("📚 Phase 1: Auditing References & Bibliography...")
@@ -70,18 +71,18 @@ def analyze_manuscript(text):
     # We explicitly ask the model to map citations first.
     audit_prompt = f"""
     You are a forensic editor. Read this manuscript:
-    {text[:150000]} 
+    {text[:100000]} 
     
     Task: Perform a 'Citation Audit'.
     1. Look at the Reference List at the end.
     2. Look at the in-text citations (e.g., (Smith, 2020) or [1]).
     3. Check: Are there in-text citations missing from the Reference list?
     4. Check: Are there References listed that are never used in the text?
-    5. Check: Are the dates consistent?
     
     Return a short summary of the Citation Health.
     """
     
+    # Using Sonnet for the audit
     audit_msg = client.messages.create(
         model=MODEL_NAME, max_tokens=1500, 
         messages=[{"role": "user", "content": audit_prompt}]
@@ -100,7 +101,7 @@ def analyze_manuscript(text):
     
     final_prompt = f"""
     MANUSCRIPT TEXT:
-    {text[:150000]}
+    {text[:100000]}
     
     CITATION AUDIT FINDINGS:
     {citation_health}
@@ -121,24 +122,20 @@ def analyze_manuscript(text):
     6. **Actionable Recommendations**: Clear steps for the authors.
     """
     
-    # Save prompts to history so Chat knows them
-    st.session_state.chat_history.append({"role": "user", "content": final_prompt})
-    
     final_msg = client.messages.create(
         model=MODEL_NAME, max_tokens=4000, system=system_prompt,
         messages=[{"role": "user", "content": final_prompt}]
     )
     
     report = final_msg.content[0].text
-    st.session_state.chat_history.append({"role": "assistant", "content": report})
-    
+    st.session_state.analysis_report = report # Save report
     status.update(label="Expert Analysis Complete", state="complete", expanded=False)
     return report
 
 # --- UI LAYOUT ---
 with st.sidebar:
     st.title("🎓 HPE Expert Reviewer")
-    st.caption("Model: Claude 3.5 Sonnet")
+    st.caption("Model: Claude 3 Sonnet")
     uploaded_file = st.file_uploader("Upload Manuscript (PDF)", type="pdf")
     if st.button("Reset System"):
         st.session_state.clear()
@@ -154,7 +151,6 @@ if uploaded_file and not st.session_state.full_text:
 if st.session_state.full_text and not st.session_state.analysis_report:
     if st.button("🚀 Start Expert Analysis"):
         report = analyze_manuscript(st.session_state.full_text)
-        st.session_state.analysis_report = report
         st.rerun()
 
 if st.session_state.analysis_report:
@@ -169,9 +165,8 @@ if st.session_state.analysis_report:
         
         # Display clean history
         for msg in st.session_state.chat_history:
-             if msg['role'] != 'user' or "MANUSCRIPT TEXT" not in msg['content']: 
-                 if len(msg['content']) < 4000:
-                    st.chat_message(msg["role"]).markdown(msg["content"])
+             if len(msg['content']) < 2000: # Filter large contexts
+                st.chat_message(msg["role"]).markdown(msg["content"])
         
         if prompt := st.chat_input("Ex: 'Where exactly is the reference mismatch?'"):
             st.chat_message("user").markdown(prompt)
