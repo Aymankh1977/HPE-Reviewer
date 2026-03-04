@@ -3,11 +3,11 @@ import os
 from io import BytesIO
 from docx import Document
 from dotenv import load_dotenv
-from anthropic import Anthropic
+from anthropic import Anthropic, NotFoundError
 from pypdf import PdfReader
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="HPE Expert Reviewer (Sonnet)", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="HPE Expert Reviewer (Hybrid)", page_icon="🎓", layout="wide")
 
 # --- SECURE KEY HANDLING ---
 try:
@@ -24,15 +24,18 @@ if not api_key:
     st.error("🚨 Configuration Error: ANTHROPIC_API_KEY is missing. Please add it to Streamlit Secrets.")
     st.stop()
 
-# --- MODEL SETTINGS (Based on your snippet) ---
-MODEL_NAME = "claude-3-sonnet-20240229"
-MAX_TOKENS = 4096  # Increased limit for deeper analysis
 client = Anthropic(api_key=api_key)
+
+# --- MODELS ---
+# We try the smartest first. If it fails, we fall back to the fast one with "Smart Prompting"
+SMART_MODEL = "claude-3-5-sonnet-20240620"
+FAST_MODEL = "claude-3-haiku-20240307"
 
 # --- SESSION STATE ---
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "full_text" not in st.session_state: st.session_state.full_text = ""
 if "analysis_report" not in st.session_state: st.session_state.analysis_report = ""
+if "current_model" not in st.session_state: st.session_state.current_model = "Unknown"
 
 # --- HELPER FUNCTIONS ---
 def get_pdf_text(uploaded_file):
@@ -60,80 +63,95 @@ def create_docx(report_text):
     doc.save(bio)
     return bio.getvalue()
 
-# --- CORE ANALYSIS LOGIC ---
+# --- INTELLIGENT AGENT LOGIC ---
 def analyze_manuscript(text):
-    status = st.status("🔍 Starting Expert Analysis (Claude 3 Sonnet)...", expanded=True)
+    status = st.status("🔍 Initializing Analysis Agents...", expanded=True)
     
-    # --- STEP 1: CITATION MAPPING ---
-    status.write("📚 Phase 1: Mapping References & Checking Logic...")
-    
-    # We ask Sonnet to understand the references first
-    audit_prompt = f"""
-    Read this manuscript (Context window optimized):
-    {text[:100000]} 
-    
-    Perform a pre-analysis check:
-    1. Scan the References list.
-    2. Check if the in-text citations match the list.
-    3. Identify the core Research Question and Conclusion.
-    
-    Return a brief 'Audit Summary' of these findings.
-    """
-    
+    # 1. ATTEMPT WITH SMART MODEL (SONNET 3.5)
     try:
-        audit_msg = client.messages.create(
-            model=MODEL_NAME, max_tokens=2000, 
-            messages=[{"role": "user", "content": audit_prompt}]
+        status.write(f"🧠 Attempting Analysis with {SMART_MODEL}...")
+        
+        system_prompt = (
+            "You are a Senior Editor for 'Medical Teacher'. Your job is to be rigorous and specific. "
+            "You do not hallucinate errors. You quote the text to prove flaws."
         )
-        citation_health = audit_msg.content[0].text
-    except Exception as e:
-        st.error(f"Error accessing Model: {e}")
-        status.update(label="Error", state="error")
-        return "Error"
+        
+        user_prompt = f"""
+        MANUSCRIPT:
+        {text[:150000]}
+        
+        Task: Write a Critical Peer Review Report.
+        1. Check the Reference List vs In-Text citations.
+        2. Check the 'Golden Thread' (Logic Flow).
+        3. Critique the Methodology against standard guidelines (CONSORT/SRQR).
+        
+        Output a structured report with Executive Summary, Method Critique, Citation Check, and Line-by-Line comments.
+        """
+        
+        msg = client.messages.create(
+            model=SMART_MODEL,
+            max_tokens=4000,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}]
+        )
+        
+        st.session_state.current_model = "Claude 3.5 Sonnet (Expert Mode)"
+        status.update(label="Analysis Complete (Expert Mode)", state="complete", expanded=False)
+        return msg.content[0].text
 
-    # --- STEP 2: CRITICAL REVIEW ---
-    status.write("🧠 Phase 2: Writing Expert Review...")
-    
-    system_prompt = (
-        "You are a Senior Academic Editor. You provide high-level, constructive, and rigorous peer reviews. "
-        "You DO NOT assume errors; you verify them against the text."
-    )
-    
-    final_prompt = f"""
-    MANUSCRIPT TEXT:
-    {text[:100000]}
-    
-    PRE-ANALYSIS FINDINGS:
-    {citation_health}
-    
-    TASK: Write a Comprehensive Peer Review Report.
-    
-    1. **Executive Summary**: Recommendation (Accept/Reject/Revise).
-    2. **Logic & Flow**: Analyze the alignment (Gap -> RQ -> Methods -> Conclusion).
-    3. **Methodology**: Specific critique of design and ethics.
-    4. **Reference Quality**: Comment on the citations based on your audit.
-    5. **Specific Comments**: Line-by-line feedback with quotes.
-    6. **Actionable Recommendations**: How to fix the paper.
-    """
-    
-    # Save prompts to history
-    st.session_state.chat_history.append({"role": "user", "content": final_prompt})
-    
-    final_msg = client.messages.create(
-        model=MODEL_NAME, max_tokens=MAX_TOKENS, system=system_prompt,
-        messages=[{"role": "user", "content": final_prompt}]
-    )
-    
-    report = final_msg.content[0].text
-    st.session_state.chat_history.append({"role": "assistant", "content": report})
-    
-    status.update(label="Analysis Complete", state="complete", expanded=False)
-    return report
+    except NotFoundError:
+        # 2. FALLBACK TO HAIKU WITH "CHAIN OF THOUGHT" (SUPER PROMPT)
+        status.write("⚠️ Expert Model not available. Switching to Enhanced Haiku Logic...")
+        st.session_state.current_model = "Claude 3 Haiku (Enhanced Logic Mode)"
+        
+        # Step A: Logic Map (Force Haiku to understand structure first)
+        status.write("⚙️ Step 1: Mapping Logic Structure...")
+        logic_prompt = f"""
+        Read this text: {text[:100000]}
+        Identify:
+        1. Research Question.
+        2. Methodology Used.
+        3. Conclusion.
+        4. Any mismatch between them.
+        Return ONLY a summary of these 4 points.
+        """
+        logic_msg = client.messages.create(
+            model=FAST_MODEL, max_tokens=1000, messages=[{"role": "user", "content": logic_prompt}]
+        )
+        logic_summary = logic_msg.content[0].text
+        
+        # Step B: Final Critique (Feed the logic map back to Haiku)
+        status.write("⚙️ Step 2: Generating Critical Report...")
+        final_prompt = f"""
+        MANUSCRIPT: {text[:100000]}
+        
+        LOGIC ANALYSIS: {logic_summary}
+        
+        Using the Logic Analysis above, write a RIGOROUS Peer Review Report.
+        - Be harsh but fair.
+        - Point out where the Conclusion does not match the Question.
+        - Critique the Methodology.
+        - Provide Actionable Recommendations.
+        """
+        
+        final_msg = client.messages.create(
+            model=FAST_MODEL, max_tokens=4000, 
+            system="You are a critical academic reviewer. Focus on logic gaps.",
+            messages=[{"role": "user", "content": final_prompt}]
+        )
+        
+        status.update(label="Analysis Complete (Enhanced Mode)", state="complete", expanded=False)
+        return final_msg.content[0].text
+
+    except Exception as e:
+        status.update(label="Error", state="error")
+        st.error(f"Unexpected Error: {e}")
+        return None
 
 # --- UI LAYOUT ---
 with st.sidebar:
     st.title("🎓 HPE Expert Reviewer")
-    st.caption(f"Model: {MODEL_NAME}")
+    st.caption("Auto-Switching Hybrid Engine")
     uploaded_file = st.file_uploader("Upload Manuscript (PDF)", type="pdf")
     if st.button("Reset System"):
         st.session_state.clear()
@@ -147,13 +165,15 @@ if uploaded_file and not st.session_state.full_text:
         st.success(f"Manuscript Loaded: {len(text)} characters.")
 
 if st.session_state.full_text and not st.session_state.analysis_report:
-    if st.button("🚀 Start Expert Analysis"):
+    if st.button("🚀 Start Hybrid Analysis"):
         report = analyze_manuscript(st.session_state.full_text)
-        if report != "Error":
+        if report:
             st.session_state.analysis_report = report
             st.rerun()
 
 if st.session_state.analysis_report:
+    st.success(f"Generated using: **{st.session_state.current_model}**")
+    
     tab1, tab2 = st.tabs(["📝 Review Report", "💬 Editor Chat"])
     
     with tab1:
@@ -163,44 +183,47 @@ if st.session_state.analysis_report:
     with tab2:
         st.info("Ask questions about the review or the manuscript.")
         
-        # Display clean history
         for msg in st.session_state.chat_history:
-             if msg['role'] != 'user' or "MANUSCRIPT TEXT" not in msg['content']: 
+             if msg['role'] != 'user': 
                  if len(msg['content']) < 4000:
                     st.chat_message(msg["role"]).markdown(msg["content"])
         
-        if prompt := st.chat_input("Ex: 'Clarify the methodology weakness'"):
+        if prompt := st.chat_input("Ex: 'Expand on the methodology critique'"):
             st.chat_message("user").markdown(prompt)
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             
             with st.chat_message("assistant"):
-                # System prompt passed separately
-                sys_prompt = "You are a helpful Senior Editor. Use the manuscript and review to answer accurately."
+                # Use the model that worked for the analysis
+                ACTIVE_MODEL = SMART_MODEL if "Sonnet" in st.session_state.current_model else FAST_MODEL
                 
-                # Context construction
-                msgs = [
-                    {"role": "user", "content": f"Manuscript Context:\n{st.session_state.full_text[:50000]}..."},
-                    {"role": "assistant", "content": "I have read the manuscript."},
-                    {"role": "user", "content": f"Critique Context:\n{st.session_state.analysis_report}"},
-                    {"role": "assistant", "content": "I have the critique ready."}
-                ]
-                
-                # Append recent history
-                for m in st.session_state.chat_history[-4:]:
-                    msgs.append(m)
-                
-                # Append current prompt
-                msgs.append({"role": "user", "content": prompt})
+                try:
+                    stream = client.messages.create(
+                        model=ACTIVE_MODEL, 
+                        max_tokens=2000, 
+                        system="You are a helpful Senior Editor.",
+                        messages=[
+                            {"role": "user", "content": f"Context: {st.session_state.analysis_report}"},
+                            {"role": "assistant", "content": "I understand the critique."},
+                            {"role": "user", "content": prompt}
+                        ], 
+                        stream=True
+                    )
+                    response = st.write_stream(chunk.delta.text for chunk in stream if chunk.type == "content_block_delta")
+                except NotFoundError:
+                    # Fallback for chat too if Sonnet fails mid-chat
+                    stream = client.messages.create(
+                        model=FAST_MODEL, 
+                        max_tokens=2000, 
+                        system="You are a helpful Senior Editor.",
+                        messages=[
+                            {"role": "user", "content": f"Context: {st.session_state.analysis_report}"},
+                            {"role": "assistant", "content": "I understand the critique."},
+                            {"role": "user", "content": prompt}
+                        ], 
+                        stream=True
+                    )
+                    response = st.write_stream(chunk.delta.text for chunk in stream if chunk.type == "content_block_delta")
 
-                stream = client.messages.create(
-                    model=MODEL_NAME, 
-                    max_tokens=2000, 
-                    system=sys_prompt,
-                    messages=msgs, 
-                    stream=True
-                )
-                response = st.write_stream(chunk.delta.text for chunk in stream if chunk.type == "content_block_delta")
-            
             st.session_state.chat_history.append({"role": "assistant", "content": response})
 else:
     if not uploaded_file: st.info("👈 Upload PDF to begin.")
