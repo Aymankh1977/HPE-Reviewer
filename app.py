@@ -1,15 +1,13 @@
 import streamlit as st
 import os
-import ast
 from io import BytesIO
 from docx import Document
 from dotenv import load_dotenv
 from anthropic import Anthropic
 from pypdf import PdfReader
-from duckduckgo_search import DDGS
 
-# --- Page Config ---
-st.set_page_config(page_title="HPE Expert Reviewer (Deep Logic)", page_icon="⚖️", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="HPE Expert Reviewer (Sonnet Edition)", page_icon="🎓", layout="wide")
 
 # --- SECURE KEY HANDLING ---
 try:
@@ -26,8 +24,9 @@ if not api_key:
     st.error("🚨 Configuration Error: ANTHROPIC_API_KEY is missing. Please add it to Streamlit Secrets.")
     st.stop()
 
-# --- MODEL CONFIG ---
-MODEL_NAME = "claude-3-haiku-20240307" 
+# --- CRITICAL CHANGE: USING INTELLIGENT MODEL ---
+# Switched from Haiku to Sonnet 3.5 for expert reasoning and citation checking
+MODEL_NAME = "claude-3-5-sonnet-20240620"
 client = Anthropic(api_key=api_key)
 
 # --- SESSION STATE ---
@@ -35,7 +34,7 @@ if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "full_text" not in st.session_state: st.session_state.full_text = ""
 if "analysis_report" not in st.session_state: st.session_state.analysis_report = ""
 
-# --- HELPERS ---
+# --- HELPER FUNCTIONS ---
 def get_pdf_text(uploaded_file):
     try:
         reader = PdfReader(uploaded_file)
@@ -61,95 +60,69 @@ def create_docx(report_text):
     doc.save(bio)
     return bio.getvalue()
 
-def search_evidence(query):
-    try:
-        results = DDGS().text(query, max_results=3)
-        return "\n".join([f"- {r['title']} ({r['href']})" for r in results]) if results else "No results."
-    except: return "Search unavailable."
-
-# --- CORE LOGIC ---
+# --- CORE ANALYSIS LOGIC ---
 def analyze_manuscript(text):
-    status = st.status("🔍 Deep Analysis in Progress...", expanded=True)
+    status = st.status("🔍 Starting Expert Analysis (Claude 3.5 Sonnet)...", expanded=True)
     
-    # 1. THE "DEEP READ" & EVIDENCE GATHERING
-    status.write("🧠 Phase 1: Identifying key claims for verification...")
+    # --- STEP 1: CITATION AUDIT ---
+    status.write("📚 Phase 1: Auditing References & Bibliography...")
     
-    scan_prompt = f"""
-    Read this manuscript text:
-    {text[:80000]}
+    # We explicitly ask the model to map citations first.
+    audit_prompt = f"""
+    You are a forensic editor. Read this manuscript:
+    {text[:150000]} 
     
-    Identify 3 SPECIFIC factual claims, dates, or citations that seem suspicious or require checking.
-    Return ONLY a Python list of strings. Example: ["Submission date 2026 vs Search date 2024", "Citation coverage of GPT-4"]
+    Task: Perform a 'Citation Audit'.
+    1. Look at the Reference List at the end.
+    2. Look at the in-text citations (e.g., (Smith, 2020) or [1]).
+    3. Check: Are there in-text citations missing from the Reference list?
+    4. Check: Are there References listed that are never used in the text?
+    5. Check: Are the dates consistent?
+    
+    Return a short summary of the Citation Health.
     """
     
-    msg1 = client.messages.create(
-        model=MODEL_NAME, max_tokens=1000, 
-        messages=[{"role": "user", "content": scan_prompt}]
+    audit_msg = client.messages.create(
+        model=MODEL_NAME, max_tokens=1500, 
+        messages=[{"role": "user", "content": audit_prompt}]
     )
+    citation_health = audit_msg.content[0].text
     
-    try:
-        raw = msg1.content[0].text
-        start, end = raw.find('['), raw.rfind(']') + 1
-        queries = ast.literal_eval(raw[start:end])
-    except:
-        queries = ["Medical education research methodology"]
-        
-    # 2. EVIDENCE FETCH
-    status.write(f"🌐 Phase 2: Verifying {len(queries)} specific claims...")
-    evidence = ""
-    for q in queries:
-        res = search_evidence(q)
-        evidence += f"Check: {q}\nResult: {res}\n\n"
-
-    # 3. THE EXPERT CRITIQUE (CHAIN OF THOUGHT)
-    status.write("📝 Phase 3: Synthesizing Expert Review...")
+    # --- STEP 2: CRITICAL REVIEW ---
+    status.write("🧠 Phase 2: Generating Deep Critical Review...")
     
     system_prompt = (
-        "You are a Senior Editor for 'Medical Teacher'. "
-        "You are famous for being 'Rigorous, Skeptical, and Constructive'. "
-        "You DO NOT accept generic statements. "
-        "You MUST quote the text to prove your critique."
+        "You are a Senior Editor for 'Medical Teacher' and 'BMC Medical Education'. "
+        "Your reviews are EVIDENCE-BASED. "
+        "You NEVER assume an error exists unless you can prove it from the text. "
+        "You focus on 'Constructive Alignment' (Gap -> Question -> Methods -> Results)."
     )
     
     final_prompt = f"""
     MANUSCRIPT TEXT:
-    {text[:120000]}
+    {text[:150000]}
     
-    EXTERNAL VERIFICATION DATA:
-    {evidence}
+    CITATION AUDIT FINDINGS:
+    {citation_health}
     
-    TASK: Write a robust Peer Review Report.
+    TASK: Write a Comprehensive Peer Review Report.
     
-    **STEP 1: INTERNAL LOGIC CHECK (Mental Scratchpad)**
-    - Identify the Research Question (RQ).
-    - Identify the Methods.
-    - Identify the Conclusion.
-    - Ask: Do they align? (The Golden Thread).
-    - Ask: Are there contradictions? (e.g. Abstract says X, Results say Y).
+    INSTRUCTIONS:
+    1. **Do not hallucinate errors.** If you claim a methodology flaw, QUOTE the sentence in the text that shows the flaw.
+    2. **Use the Citation Audit.** Use the findings provided above to comment on the reference quality.
+    3. **Tone:** Professional, objective, expert. Not harsh for the sake of being harsh.
     
-    **STEP 2: WRITE THE REPORT**
-    Use this structure:
-    
-    1. **Executive Summary & Decision** (Accept/Reject/Revise).
-    2. **The Logic & Alignment Check**:
-       - Critique the "Golden Thread". Does the RQ match the Conclusion?
-       - Point out contradictions using QUOTES from the text.
-    3. **Methodological Rigor**:
-       - Critique Sample Size, Ethics, and Data Analysis. 
-       - Be specific (e.g., "The authors claim grounded theory but used thematic analysis").
-    4. **Forensic Accuracy Check**:
-       - Use the 'External Verification Data' above.
-       - Highlight date errors (e.g., 2026 submission vs 2024 data).
-       - Highlight technical errors (e.g., hallucinated models).
-    5. **Specific Section Comments**:
-       - Intro: Is the gap real?
-       - Methods: Is it reproducible?
-       - Results: Over-interpreted?
-    6. **Actionable Fixes**:
-       - Specific instructions (e.g., "Create a table comparing X...", "Delete paragraph 2").
-
-    Tone: High-level Academic.
+    REPORT SECTIONS:
+    1. **Executive Summary**: Brief overview and decision recommendation.
+    2. **Logic & Flow**: Does the 'Golden Thread' hold? (Alignment of RQ -> Methods -> Conclusion).
+    3. **Methodological Critique**: Specific feedback on Sample, Design, and Analysis.
+    4. **Citation & Reference Quality**: (Insert the Citation Audit findings here).
+    5. **Specific Comments**: Line-by-line feedback.
+    6. **Actionable Recommendations**: Clear steps for the authors.
     """
+    
+    # Save prompts to history so Chat knows them
+    st.session_state.chat_history.append({"role": "user", "content": final_prompt})
     
     final_msg = client.messages.create(
         model=MODEL_NAME, max_tokens=4000, system=system_prompt,
@@ -157,75 +130,76 @@ def analyze_manuscript(text):
     )
     
     report = final_msg.content[0].text
-    status.update(label="Analysis Complete", state="complete", expanded=False)
+    st.session_state.chat_history.append({"role": "assistant", "content": report})
+    
+    status.update(label="Expert Analysis Complete", state="complete", expanded=False)
     return report
 
-# --- UI ---
+# --- UI LAYOUT ---
 with st.sidebar:
-    st.title("⚖️ HPE Expert Reviewer")
-    st.markdown("Deep Logic + Evidence Check")
+    st.title("🎓 HPE Expert Reviewer")
+    st.caption("Model: Claude 3.5 Sonnet")
     uploaded_file = st.file_uploader("Upload Manuscript (PDF)", type="pdf")
-    if st.button("Reset"):
+    if st.button("Reset System"):
         st.session_state.clear()
         st.rerun()
 
+# --- MAIN APP ---
 if uploaded_file and not st.session_state.full_text:
     text = get_pdf_text(uploaded_file)
     if text:
         st.session_state.full_text = text
-        st.success(f"Loaded {len(text)} characters.")
+        st.success(f"Manuscript Loaded: {len(text)} characters.")
 
 if st.session_state.full_text and not st.session_state.analysis_report:
-    if st.button("🚀 Start Deep Analysis"):
+    if st.button("🚀 Start Expert Analysis"):
         report = analyze_manuscript(st.session_state.full_text)
         st.session_state.analysis_report = report
         st.rerun()
 
 if st.session_state.analysis_report:
-    tab1, tab2 = st.tabs(["📝 Review Report", "💬 Expert Chat"])
+    tab1, tab2 = st.tabs(["📝 Review Report", "💬 Editor Chat"])
     
     with tab1:
         st.markdown(st.session_state.analysis_report)
         st.download_button("Download Report (Word)", create_docx(st.session_state.analysis_report), "Review.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     
     with tab2:
-        st.markdown("### Ask follow-up questions")
+        st.info("Ask questions about the review or the manuscript.")
         
         # Display clean history
         for msg in st.session_state.chat_history:
-             st.chat_message(msg["role"]).markdown(msg["content"])
+             if msg['role'] != 'user' or "MANUSCRIPT TEXT" not in msg['content']: 
+                 if len(msg['content']) < 4000:
+                    st.chat_message(msg["role"]).markdown(msg["content"])
         
-        if prompt := st.chat_input("Ex: 'Rewrite the abstract to fix the logic gap'"):
+        if prompt := st.chat_input("Ex: 'Where exactly is the reference mismatch?'"):
             st.chat_message("user").markdown(prompt)
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             
             with st.chat_message("assistant"):
-                # --- FIXED CHAT LOGIC ---
-                # 1. System prompt goes in 'system' param, not messages list.
-                chat_system_prompt = "You are a co-author helping fix the paper based on the review. Be academic and precise."
+                # System prompt passed separately to avoid BadRequestError
+                sys_prompt = "You are a helpful Senior Editor. Use the manuscript and review to answer accurately."
                 
-                # 2. Construct context messages correctly (User -> Assistant -> User)
-                # We seed the context as the first interaction
+                # Context construction
                 msgs = [
-                    {
-                        "role": "user", 
-                        "content": f"Here is the manuscript context (truncated):\n{st.session_state.full_text[:30000]}\n\nAnd here is the critique report:\n{st.session_state.analysis_report}"
-                    },
-                    {
-                        "role": "assistant", 
-                        "content": "I have read the manuscript and the critique. I am ready to help you improve the paper."
-                    }
+                    {"role": "user", "content": f"Manuscript Context:\n{st.session_state.full_text[:50000]}..."},
+                    {"role": "assistant", "content": "I have read the manuscript."},
+                    {"role": "user", "content": f"Critique Context:\n{st.session_state.analysis_report}"},
+                    {"role": "assistant", "content": "I have the critique ready."}
                 ]
                 
-                # 3. Append the actual conversation history
-                for m in st.session_state.chat_history:
+                # Append recent history
+                for m in st.session_state.chat_history[-4:]:
                     msgs.append(m)
                 
-                # 4. API Call
+                # Append current prompt
+                msgs.append({"role": "user", "content": prompt})
+
                 stream = client.messages.create(
                     model=MODEL_NAME, 
                     max_tokens=2000, 
-                    system=chat_system_prompt, # SYSTEM PROMPT HERE
+                    system=sys_prompt,
                     messages=msgs, 
                     stream=True
                 )
@@ -233,4 +207,4 @@ if st.session_state.analysis_report:
             
             st.session_state.chat_history.append({"role": "assistant", "content": response})
 else:
-    if not uploaded_file: st.info("👈 Upload PDF to start.")
+    if not uploaded_file: st.info("👈 Upload PDF to begin.")
