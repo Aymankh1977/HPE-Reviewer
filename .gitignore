@@ -1,2 +1,27 @@
+# Environment & secrets — NEVER commit these
 .env
+.env.*
+secrets.toml
+.streamlit/secrets.toml
+
+# PDFs — never store manuscripts in the repo
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
 venv/
+.venv/
+env/
+
+# Reports generated locally
+Review_Report.md
+*.docx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
