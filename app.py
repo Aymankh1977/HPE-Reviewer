@@ -12,6 +12,12 @@ from dotenv import load_dotenv
 from anthropic import Anthropic, NotFoundError
 from pypdf import PdfReader
 
+try:
+    from duckduckgo_search import DDGS
+    DDG_AVAILABLE = True
+except ImportError:
+    DDG_AVAILABLE = False
+
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="DentEdTech™ | HPE Expert Reviewer",
@@ -89,12 +95,9 @@ defaults = {
     "model_used":        "",
     "session_start":     None,
     "upload_count":      0,
-    # Similarity audit
     "similarity_report": None,
     "raw_similarity":    "",
-    "prev_pdf_base64":   None,
-    "prev_pdf_name":     "",
-    "prev_pdf_text":     "",
+    "search_results":    [],
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -165,12 +168,68 @@ def clear_session_data():
     sensitive_keys = [
         "pdf_base64", "pdf_name", "pdf_hash", "pdf_text",
         "report", "raw_report", "chat_history", "model_used",
-        "similarity_report", "raw_similarity",
-        "prev_pdf_base64", "prev_pdf_name", "prev_pdf_text",
+        "similarity_report", "raw_similarity", "search_results",
     ]
     for k in sensitive_keys:
         st.session_state[k] = defaults[k]
     st.session_state.upload_count = 0
+
+
+def extract_search_queries(pdf_text: str) -> list[str]:
+    """Ask Claude to extract 5 key phrases most likely to be similar to published work."""
+    prompt = (
+        "Read this manuscript excerpt and extract exactly 5 short search queries "
+        "(4-8 words each) that represent the most distinctive claims, methods, or "
+        "findings. These will be used to search for similar published papers. "
+        "Return ONLY a JSON array of 5 strings, no other text.\n\n"
+        f"MANUSCRIPT EXCERPT:\n{pdf_text[:8000]}"
+    )
+    try:
+        response = client.messages.create(
+            model=CHAT_MODEL,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        start = raw.index("["); end = raw.rindex("]") + 1
+        return json.loads(raw[start:end])
+    except Exception:
+        # Fallback: extract first sentence of abstract as query
+        lines = [l.strip() for l in pdf_text.split("\n") if len(l.strip()) > 40]
+        return [lines[0][:80]] if lines else ["dental education quality assurance AI"]
+
+
+def search_web(queries: list[str]) -> list[dict]:
+    """Search DuckDuckGo for each query and return results."""
+    if not DDG_AVAILABLE:
+        return []
+    all_results = []
+    seen_urls = set()
+    try:
+        with DDGS() as ddgs:
+            for query in queries:
+                try:
+                    results = list(ddgs.text(
+                        f"{query} site:pubmed.ncbi.nlm.nih.gov OR site:scholar.google.com "
+                        f"OR site:researchgate.net OR site:tandfonline.com OR site:wiley.com "
+                        f"OR site:springer.com OR site:sciencedirect.com",
+                        max_results=3,
+                    ))
+                    for r in results:
+                        url = r.get("href", "")
+                        if url not in seen_urls:
+                            seen_urls.add(url)
+                            all_results.append({
+                                "title": r.get("title", ""),
+                                "url":   url,
+                                "body":  r.get("body", ""),
+                                "query": query,
+                            })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return all_results[:12]  # cap at 12 results total
 
 
 def build_system_prompt(journal: str) -> str:
@@ -237,61 +296,64 @@ Return ONLY a valid JSON object — no markdown fences, no preamble — with exa
     "potentially_outdated": ["<citation — reason>"],
     "mismatches": "<in-text vs reference list issues, or None identified>"
   }},
-  "actionable_recommendations": [
-    "<Numbered, specific action the authors must take>"
-  ],
+  "actionable_recommendations": ["<Numbered, specific action the authors must take>"],
   "editor_note": "<Confidential note to the editor — not shared with authors>"
 }}"""
 
 
-def build_similarity_prompt(has_previous: bool) -> str:
-    prev_section = ""
-    if has_previous:
-        prev_section = """
-TASK B — SELF-PLAGIARISM CHECK:
-Also compare the NEW manuscript against the PREVIOUS manuscript provided.
-Identify sections where text is substantially similar, reused, or minimally paraphrased.
-For each overlap found, quote both versions side by side.
-"""
-    return f"""You are an academic integrity specialist. Analyse this manuscript for originality and similarity risks.
+def build_similarity_prompt(search_results: list[dict]) -> str:
+    search_block = ""
+    if search_results:
+        search_block = "\n\nSIMILAR PUBLISHED PAPERS FOUND ONLINE:\n"
+        for i, r in enumerate(search_results, 1):
+            search_block += (
+                f"\n[{i}] Title: {r['title']}\n"
+                f"    URL: {r['url']}\n"
+                f"    Summary: {r['body'][:300]}\n"
+            )
 
-IMPORTANT DISCLAIMER TO INCLUDE IN YOUR RESPONSE:
-This is an AI-based originality risk assessment only. It is NOT equivalent to Turnitin or iThenticate,
-which compare against millions of published papers. This tool identifies internal patterns and
-writing risks only. Always run your manuscript through your institution's official similarity checker
-before submission.
+    return f"""You are an academic integrity and publication similarity specialist.
+Analyse this manuscript for originality and similarity risks.
 
-TASK A — ORIGINALITY AND PARAPHRASE RISK AUDIT:
-Read the full manuscript and identify:
+1. SIMILARITY TO PUBLISHED LITERATURE:
+   Using the search results below, assess how closely this manuscript's topic,
+   methodology, or findings overlap with already-published papers.
+   For each similar paper found, explain what overlaps and what the authors should do.
 
-1. BOILERPLATE SECTIONS: Text that reads as copied or minimally adapted from standard sources
-   (definitions, guideline descriptions, standard methodology templates).
-   Quote the exact passage and explain the risk.
+2. INTERNAL ORIGINALITY AUDIT:
+   Identify passages that are:
+   - Boilerplate or copied from standard sources (definitions, guideline text, protocols)
+   - Factual claims with no citation
+   - Sections with sudden style changes suggesting imported text
+   - Passages repeated between sections (abstract, introduction, discussion, conclusion)
 
-2. CITATION-FREE FACTUAL CLAIMS: Paragraphs containing specific facts, statistics, or claims
-   with no citation — these are high similarity-risk zones. Quote each passage found.
+3. METHODS SECTION RISK:
+   Assess whether the methods section reads as original or copied from guidelines/protocols.
 
-3. PARAPHRASE WARNING ZONES: Sections where the writing style suddenly changes, becomes
-   unusually formal or informal, or where sentences are structured in a way that suggests
-   translation from another source. Quote each passage and explain the stylistic anomaly.
+4. OVERALL SIMILARITY RISK:
+   Give an estimated risk level and percentage with specific rewrite advice.
+{search_block}
 
-4. REPEATED INTERNAL TEXT: Any passages that appear more than once within this manuscript
-   (self-repetition between abstract, introduction, discussion, conclusion).
-   Quote both instances.
-
-5. METHODS SECTION RISK: Flag if the methods section contains standard protocol descriptions
-   that are likely copied from guidelines, previous papers, or kit manufacturer instructions.
-{prev_section}
 Return ONLY a valid JSON object — no markdown, no preamble:
 
 {{
   "overall_risk_level": "Low | Moderate | High | Very High",
   "estimated_similarity_risk_percent": <integer 0-100>,
-  "disclaimer": "<standard disclaimer about this not being Turnitin>",
+  "disclaimer": "This is an AI-based originality risk assessment. It searches open-access content only and is not equivalent to Turnitin or iThenticate. Always use your institution's official similarity checker before submission.",
+  "similar_publications": [
+    {{
+      "title": "<paper title>",
+      "url": "<paper url>",
+      "overlap_description": "<what specifically overlaps with this manuscript>",
+      "overlap_type": "topic | methodology | findings | framing | significant overlap",
+      "risk_level": "Low | Moderate | High",
+      "recommendation": "<what authors should do to differentiate>"
+    }}
+  ],
   "boilerplate_sections": [
     {{
       "section": "<where in the paper>",
-      "passage": "<quoted text>",
+      "passage": "<quoted text from manuscript>",
       "risk": "<why this is high risk>",
       "suggestion": "<how to rewrite>"
     }}
@@ -300,14 +362,7 @@ Return ONLY a valid JSON object — no markdown, no preamble:
     {{
       "passage": "<quoted text>",
       "risk": "<what claim needs a citation>",
-      "suggestion": "<add citation for X>"
-    }}
-  ],
-  "paraphrase_warnings": [
-    {{
-      "section": "<where>",
-      "passage": "<quoted text>",
-      "anomaly": "<what is stylistically suspicious>"
+      "suggestion": "<what to cite>"
     }}
   ],
   "internal_repetition": [
@@ -317,47 +372,37 @@ Return ONLY a valid JSON object — no markdown, no preamble:
     }}
   ],
   "methods_risk": "<assessment of the methods section originality>",
-  "self_plagiarism": [
-    {{
-      "new_manuscript_passage": "<quoted from new>",
-      "previous_manuscript_passage": "<quoted from previous>",
-      "overlap_type": "identical | near-identical | paraphrased",
-      "suggestion": "<how to differentiate or cite>"
-    }}
-  ],
-  "priority_rewrites": [
-    "<specific, actionable rewrite instruction>"
-  ],
-  "submission_readiness": "<overall advice on whether similarity risk is likely to cause desk rejection>"
+  "priority_rewrites": ["<specific numbered rewrite instruction>"],
+  "submission_readiness": "<overall verdict and advice on similarity risk>"
 }}"""
 
 
-def call_api_with_pdf(system: str, user_prompt: str, model: str, extra_doc_b64: str = None) -> str:
-    content = []
-    if extra_doc_b64:
-        content.append({
-            "type": "document",
-            "source": {"type": "base64", "media_type": "application/pdf", "data": extra_doc_b64},
-        })
-    content.append({
-        "type": "document",
-        "source": {"type": "base64", "media_type": "application/pdf",
-                   "data": st.session_state.pdf_base64},
-    })
-    content.append({"type": "text", "text": user_prompt})
+def call_api_with_pdf(system: str, user_prompt: str, model: str) -> str:
     response = client.messages.create(
         model=model,
         max_tokens=4096,
         system=system,
-        messages=[{"role": "user", "content": content}],
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": st.session_state.pdf_base64,
+                    },
+                },
+                {"type": "text", "text": user_prompt},
+            ],
+        }],
     )
     return response.content[0].text
 
 
-def call_api_with_text(system: str, user_prompt: str, model: str, extra_text: str = None) -> str:
-    text = st.session_state.pdf_text[:80_000]
-    prev_block = f"\n\nPREVIOUS MANUSCRIPT TEXT:\n{extra_text[:40_000]}" if extra_text else ""
-    full_prompt = f"NEW MANUSCRIPT TEXT:\n{text}{prev_block}\n\n{user_prompt}"
+def call_api_with_text(system: str, user_prompt: str, model: str) -> str:
+    text = st.session_state.pdf_text[:100_000]
+    full_prompt = f"MANUSCRIPT TEXT:\n{text}\n\n{user_prompt}"
     response = client.messages.create(
         model=model,
         max_tokens=4096,
@@ -480,6 +525,20 @@ def render_risk_badge(risk: str) -> str:
     )
 
 
+def render_overlap_badge(level: str) -> str:
+    colours = {
+        "low":      ("#d4edda", "#155724"),
+        "moderate": ("#fff3cd", "#856404"),
+        "high":     ("#f8d7da", "#721c24"),
+    }
+    key = level.lower().strip()
+    bg, fg = colours.get(key, ("#e2e3e5", "#383d41"))
+    return (
+        f'<span style="background:{bg};color:{fg};padding:2px 10px;'
+        f'border-radius:12px;font-size:0.8rem;font-weight:600;">{level}</span>'
+    )
+
+
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("🎓 DentEdTech™")
@@ -522,6 +581,7 @@ with st.sidebar:
             st.session_state.chat_history      = []
             st.session_state.similarity_report = None
             st.session_state.raw_similarity    = ""
+            st.session_state.search_results    = []
             st.session_state.upload_count     += 1
         st.success(f"✅ {uploaded.name}")
         st.caption(
@@ -651,7 +711,7 @@ if not st.session_state.report and not st.session_state.raw_report:
             <span style="background:#e8f4f0;color:#1d6b52;padding:5px 14px;border-radius:20px;font-size:0.85rem">CONSORT / SRQR / COREQ</span>
             <span style="background:#e8f4f0;color:#1d6b52;padding:5px 14px;border-radius:20px;font-size:0.85rem">Kirkpatrick framework</span>
             <span style="background:#e8f4f0;color:#1d6b52;padding:5px 14px;border-radius:20px;font-size:0.85rem">Citation audit</span>
-            <span style="background:#e8f4f0;color:#1d6b52;padding:5px 14px;border-radius:20px;font-size:0.85rem">Similarity risk audit</span>
+            <span style="background:#e8f4f0;color:#1d6b52;padding:5px 14px;border-radius:20px;font-size:0.85rem">Web similarity search</span>
             <span style="background:#e8f4f0;color:#1d6b52;padding:5px 14px;border-radius:20px;font-size:0.85rem">Interactive Q&amp;A</span>
           </div>
         </div>
@@ -706,9 +766,7 @@ with tab_report:
 
         kp = report.get("kirkpatrick_level", {})
         if kp:
-            st.info(
-                f"🎯 **Kirkpatrick Level {kp.get('level','?')}** — {kp.get('justification','')}"
-            )
+            st.info(f"🎯 **Kirkpatrick Level {kp.get('level','?')}** — {kp.get('justification','')}")
 
         st.divider()
 
@@ -725,15 +783,12 @@ with tab_report:
         if weaknesses:
             majors = [w for w in weaknesses if w.get("severity") == "major"]
             minors = [w for w in weaknesses if w.get("severity") != "major"]
-            with st.expander(
-                f"⚠️ Weaknesses — {len(majors)} major, {len(minors)} minor", expanded=True
-            ):
+            with st.expander(f"⚠️ Weaknesses — {len(majors)} major, {len(minors)} minor", expanded=True):
                 for w in weaknesses:
                     sev    = w.get("severity", "minor")
                     colour = "🔴" if sev == "major" else "🟡"
                     st.markdown(
-                        f"{colour} **[{sev.upper()} — {w.get('section','')}]** "
-                        f"{w.get('issue','')}"
+                        f"{colour} **[{sev.upper()} — {w.get('section','')}]** {w.get('issue','')}"
                     )
                     if w.get("suggestion"):
                         st.caption(f"→ {w['suggestion']}")
@@ -775,65 +830,62 @@ with tab_report:
 # ─── SIMILARITY TAB ───────────────────────────────────────────────────────────
 with tab_similarity:
     st.info(
-        "⚠️ **Important disclaimer:** This is an AI-based originality risk assessment only. "
-        "It is **not** equivalent to Turnitin or iThenticate, which compare against millions "
-        "of published papers. This tool identifies internal writing patterns and risk indicators "
-        "only. Always run your manuscript through your institution's official similarity checker "
-        "before submission."
+        "⚠️ **Important disclaimer:** This tool searches open-access content online "
+        "(PubMed, ResearchGate, publisher sites) and analyses your manuscript internally. "
+        "It is **not** equivalent to Turnitin or iThenticate. Always run your final manuscript "
+        "through your institution's official similarity checker before submission."
     )
 
-    st.markdown("#### Optional: Upload a previous manuscript to check for self-plagiarism")
-    prev_uploaded = st.file_uploader(
-        "Upload previous manuscript PDF (optional — for self-plagiarism check)",
-        type=["pdf"],
-        key="prev_upload",
-    )
-    if prev_uploaded:
-        if prev_uploaded.name != st.session_state.prev_pdf_name:
-            with st.spinner("Encoding previous manuscript…"):
-                pb64, ptxt, _ = encode_pdf(prev_uploaded)
-            st.session_state.prev_pdf_base64 = pb64
-            st.session_state.prev_pdf_text   = ptxt
-            st.session_state.prev_pdf_name   = prev_uploaded.name
-        st.success(f"✅ Previous manuscript loaded: {prev_uploaded.name}")
-
-    has_previous = bool(st.session_state.prev_pdf_base64)
+    if not DDG_AVAILABLE:
+        st.warning(
+            "Web search is unavailable — `duckduckgo-search` is not installed. "
+            "Add `duckduckgo-search` to your `requirements.txt` to enable online search. "
+            "Internal originality audit will still run."
+        )
 
     if st.button(
         "🔍 Run Similarity & Originality Audit",
         disabled=not bool(st.session_state.pdf_base64),
+        use_container_width=False,
     ):
         st.session_state.similarity_report = None
         st.session_state.raw_similarity    = ""
+        st.session_state.search_results    = []
 
-        with st.status("Running originality audit…", expanded=True) as sim_status:
-            st.write("⚙️ Scanning for boilerplate sections…")
-            st.write("⚙️ Checking citation-free factual claims…")
-            st.write("⚙️ Detecting paraphrase warning zones…")
-            st.write("⚙️ Checking internal repetition…")
-            if has_previous:
-                st.write("⚙️ Comparing against previous manuscript for self-plagiarism…")
+        with st.status("Running similarity audit…", expanded=True) as sim_status:
 
-            sim_prompt = build_similarity_prompt(has_previous)
+            # Step 1 — Extract search queries
+            sim_status.write("🔎 Step 1 — Extracting key phrases from manuscript…")
+            queries = extract_search_queries(st.session_state.pdf_text)
+            sim_status.write(f"   Found {len(queries)} search queries")
+
+            # Step 2 — Web search
+            if DDG_AVAILABLE:
+                sim_status.write("🌐 Step 2 — Searching open-access publications online…")
+                search_results = search_web(queries)
+                st.session_state.search_results = search_results
+                sim_status.write(f"   Found {len(search_results)} potentially similar papers")
+            else:
+                search_results = []
+                sim_status.write("⚠️ Step 2 — Web search skipped (duckduckgo-search not installed)")
+
+            # Step 3 — AI analysis
+            sim_status.write("🧠 Step 3 — Analysing manuscript originality with AI…")
+            sim_prompt = build_similarity_prompt(search_results)
             sim_system = (
-                "You are an academic integrity and originality specialist. "
+                "You are an academic integrity and publication similarity specialist. "
                 "You analyse manuscripts for similarity risks, boilerplate text, "
-                "paraphrase patterns, and self-plagiarism. "
-                "You are precise and quote exact passages. You never fabricate text."
+                "paraphrase patterns, and overlap with published literature. "
+                "You are precise, quote exact passages, and never fabricate."
             )
+
             sim_raw = None
             try:
-                extra = st.session_state.prev_pdf_base64 if has_previous else None
-                sim_raw = call_api_with_pdf(
-                    sim_system, sim_prompt, FALLBACK_MODEL, extra_doc_b64=extra
-                )
+                sim_raw = call_api_with_pdf(sim_system, sim_prompt, FALLBACK_MODEL)
             except Exception as e:
-                st.write(f"⚠️ PDF mode failed ({e}) — using text mode…")
+                sim_status.write(f"⚠️ PDF mode failed ({e}) — using text mode…")
                 try:
-                    extra_text = st.session_state.prev_pdf_text if has_previous else None
-                    sim_raw = call_api_with_text(
-                        sim_system, sim_prompt, FALLBACK_MODEL, extra_text=extra_text
-                    )
+                    sim_raw = call_api_with_text(sim_system, sim_prompt, FALLBACK_MODEL)
                 except Exception as e2:
                     sim_status.update(label=f"Error: {e2}", state="error")
                     st.stop()
@@ -841,16 +893,16 @@ with tab_similarity:
             parsed_sim = parse_json(sim_raw)
             st.session_state.similarity_report = parsed_sim
             st.session_state.raw_similarity    = sim_raw
-            sim_status.update(
-                label="Originality audit complete ✓", state="complete", expanded=False
-            )
+            sim_status.update(label="Similarity audit complete ✓", state="complete", expanded=False)
         st.rerun()
 
-    # ── Display similarity results ─────────────────────────────────────────────
+    # ── Display results ────────────────────────────────────────────────────────
     sim = st.session_state.similarity_report
+
     if sim is None and st.session_state.raw_similarity:
         st.warning("Could not parse structured output — showing raw audit.")
-        st.text_area("Raw similarity audit", st.session_state.raw_similarity, height=500)
+        st.text_area("Raw audit", st.session_state.raw_similarity, height=500)
+
     elif sim:
         risk = sim.get("overall_risk_level", "Unknown")
         est  = sim.get("estimated_similarity_risk_percent", "—")
@@ -861,14 +913,46 @@ with tab_similarity:
         with col2:
             st.metric(
                 "Estimated risk", f"~{est}%",
-                help="AI estimate only — not equivalent to Turnitin score",
+                help="AI estimate based on open-access search — not equivalent to Turnitin",
             )
 
         st.caption(sim.get("disclaimer", ""))
         st.markdown(f"**Submission readiness:** {sim.get('submission_readiness','—')}")
         st.divider()
 
-        # Boilerplate
+        # ── Similar publications found online ──────────────────────────────────
+        pubs = sim.get("similar_publications", [])
+        if pubs:
+            with st.expander(f"🌐 Similar Publications Found Online ({len(pubs)})", expanded=True):
+                for p in pubs:
+                    rl = p.get("risk_level", "")
+                    st.markdown(
+                        f"**{p.get('title','')}** "
+                        f"{render_overlap_badge(rl)}",
+                        unsafe_allow_html=True,
+                    )
+                    if p.get("url"):
+                        st.markdown(f"🔗 [{p['url']}]({p['url']})")
+                    st.markdown(f"**Overlap:** {p.get('overlap_description','')}")
+                    st.markdown(f"**Overlap type:** `{p.get('overlap_type','')}`")
+                    if p.get("recommendation"):
+                        st.success(f"✏️ {p['recommendation']}")
+                    st.divider()
+        else:
+            with st.expander("🌐 Similar Publications Found Online", expanded=False):
+                st.success("✅ No significantly similar papers identified in open-access search.")
+
+        # ── Search queries used ────────────────────────────────────────────────
+        if st.session_state.search_results:
+            with st.expander(f"🔎 Raw Search Results ({len(st.session_state.search_results)} papers found)", expanded=False):
+                st.caption("These are the papers retrieved from the web search before AI analysis.")
+                for r in st.session_state.search_results:
+                    st.markdown(f"**{r['title']}**")
+                    st.caption(f"Query: `{r['query']}` · URL: {r['url']}")
+                    st.write(r["body"][:200] + "…")
+                    st.divider()
+
+        # ── Boilerplate ────────────────────────────────────────────────────────
         boiler = sim.get("boilerplate_sections", [])
         if boiler:
             with st.expander(f"📋 Boilerplate Sections Detected ({len(boiler)})", expanded=True):
@@ -880,9 +964,9 @@ with tab_similarity:
                     st.divider()
         else:
             with st.expander("📋 Boilerplate Sections", expanded=False):
-                st.success("✅ No significant boilerplate sections detected.")
+                st.success("✅ No significant boilerplate detected.")
 
-        # Citation-free claims
+        # ── Citation-free claims ───────────────────────────────────────────────
         claims = sim.get("citation_free_claims", [])
         if claims:
             with st.expander(f"📎 Citation-Free Factual Claims ({len(claims)})", expanded=True):
@@ -893,22 +977,9 @@ with tab_similarity:
                     st.divider()
         else:
             with st.expander("📎 Citation-Free Claims", expanded=False):
-                st.success("✅ No significant citation-free factual claims detected.")
+                st.success("✅ No significant uncited claims detected.")
 
-        # Paraphrase warnings
-        warnings = sim.get("paraphrase_warnings", [])
-        if warnings:
-            with st.expander(f"⚠️ Paraphrase Warning Zones ({len(warnings)})", expanded=True):
-                for item in warnings:
-                    st.markdown(f"**Section:** {item.get('section','')}")
-                    st.warning(f"🟡 **Suspicious passage:**\n> {item.get('passage','')}")
-                    st.caption(f"Anomaly: {item.get('anomaly','')}")
-                    st.divider()
-        else:
-            with st.expander("⚠️ Paraphrase Warnings", expanded=False):
-                st.success("✅ No significant paraphrase warning zones detected.")
-
-        # Internal repetition
+        # ── Internal repetition ────────────────────────────────────────────────
         repeats = sim.get("internal_repetition", [])
         if repeats:
             with st.expander(f"🔁 Internal Repetition ({len(repeats)})", expanded=True):
@@ -920,37 +991,13 @@ with tab_similarity:
             with st.expander("🔁 Internal Repetition", expanded=False):
                 st.success("✅ No significant internal repetition detected.")
 
-        # Methods risk
+        # ── Methods risk ───────────────────────────────────────────────────────
         methods_risk = sim.get("methods_risk", "")
         if methods_risk:
             with st.expander("🔬 Methods Section Originality", expanded=True):
                 st.write(methods_risk)
 
-        # Self-plagiarism
-        self_plag = sim.get("self_plagiarism", [])
-        if has_previous:
-            if self_plag:
-                with st.expander(
-                    f"♻️ Self-Plagiarism Detected ({len(self_plag)})", expanded=True
-                ):
-                    for item in self_plag:
-                        overlap = item.get("overlap_type", "")
-                        colour  = "🔴" if overlap == "identical" else "🟡"
-                        st.markdown(f"{colour} **Overlap type: {overlap.upper()}**")
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            st.markdown("**New manuscript:**")
-                            st.info(item.get("new_manuscript_passage", ""))
-                        with col_b:
-                            st.markdown("**Previous manuscript:**")
-                            st.warning(item.get("previous_manuscript_passage", ""))
-                        st.caption(f"Suggestion: {item.get('suggestion','')}")
-                        st.divider()
-            else:
-                with st.expander("♻️ Self-Plagiarism Check", expanded=False):
-                    st.success("✅ No significant overlap with previous manuscript detected.")
-
-        # Priority rewrites
+        # ── Priority rewrites ──────────────────────────────────────────────────
         rewrites = sim.get("priority_rewrites", [])
         if rewrites:
             with st.expander(f"✏️ Priority Rewrites ({len(rewrites)})", expanded=True):
@@ -959,9 +1006,7 @@ with tab_similarity:
 
 # ─── CHAT TAB ─────────────────────────────────────────────────────────────────
 with tab_chat:
-    st.caption(
-        "Ask questions about the review or the manuscript. The full PDF is in context."
-    )
+    st.caption("Ask questions about the review or the manuscript. The full PDF is in context.")
 
     quick_prompts = [
         "Expand on the methodology critique",
@@ -981,9 +1026,7 @@ with tab_chat:
     display_history = st.session_state.chat_history[2:]
     for msg in display_history:
         role    = msg["role"]
-        content = (
-            msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
-        )
+        content = msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
         with st.chat_message(role):
             st.markdown(content)
 
