@@ -377,10 +377,10 @@ Return ONLY a valid JSON object — no markdown, no preamble:
 }}"""
 
 
-def call_api_with_pdf(system: str, user_prompt: str, model: str) -> str:
+def call_api_with_pdf(system: str, user_prompt: str, model: str, max_tok: int = 4096) -> str:
     response = client.messages.create(
         model=model,
-        max_tokens=4096,
+        max_tokens=max_tok,
         system=system,
         messages=[{
             "role": "user",
@@ -400,12 +400,12 @@ def call_api_with_pdf(system: str, user_prompt: str, model: str) -> str:
     return response.content[0].text
 
 
-def call_api_with_text(system: str, user_prompt: str, model: str) -> str:
+def call_api_with_text(system: str, user_prompt: str, model: str, max_tok: int = 4096) -> str:
     text = st.session_state.pdf_text[:100_000]
     full_prompt = f"MANUSCRIPT TEXT:\n{text}\n\n{user_prompt}"
     response = client.messages.create(
         model=model,
-        max_tokens=4096,
+        max_tokens=max_tok,
         system=system,
         messages=[{"role": "user", "content": full_prompt}],
     )
@@ -413,10 +413,34 @@ def call_api_with_text(system: str, user_prompt: str, model: str) -> str:
 
 
 def parse_json(raw: str) -> dict | None:
+    """Parse JSON robustly — handles markdown fences, preamble, and nested braces."""
+    if not raw:
+        return None
+    cleaned = raw.strip()
+    # Strip markdown code fences
+    if "```" in cleaned:
+        parts = cleaned.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("{"):
+                cleaned = part
+                break
+    # Find outermost JSON object using brace matching
     try:
-        start = raw.index("{")
-        end   = raw.rindex("}") + 1
-        return json.loads(raw[start:end])
+        start = cleaned.index("{")
+        depth = 0
+        end = start
+        for i, ch in enumerate(cleaned[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        return json.loads(cleaned[start:end])
     except (ValueError, json.JSONDecodeError):
         return None
 
@@ -569,21 +593,29 @@ with st.sidebar:
 
     uploaded = st.file_uploader("Upload manuscript (PDF)", type=["pdf"])
     if uploaded:
-        if uploaded.name != st.session_state.pdf_name:
+        if uploaded.name != st.session_state.pdf_name or (
+            uploaded.name == st.session_state.pdf_name and not st.session_state.pdf_base64
+        ):
             with st.spinner("Encoding PDF in memory…"):
                 b64, txt, sha = encode_pdf(uploaded)
-            st.session_state.pdf_base64        = b64
-            st.session_state.pdf_text          = txt
-            st.session_state.pdf_hash          = sha
-            st.session_state.pdf_name          = uploaded.name
-            st.session_state.report            = None
-            st.session_state.raw_report        = ""
-            st.session_state.chat_history      = []
-            st.session_state.similarity_report = None
-            st.session_state.raw_similarity    = ""
-            st.session_state.search_results    = []
-            st.session_state.upload_count     += 1
-        st.success(f"✅ {uploaded.name}")
+            # Only reset if file actually changed (compare hash)
+            if sha != st.session_state.pdf_hash:
+                st.session_state.pdf_base64        = b64
+                st.session_state.pdf_text          = txt
+                st.session_state.pdf_hash          = sha
+                st.session_state.pdf_name          = uploaded.name
+                st.session_state.report            = None
+                st.session_state.raw_report        = ""
+                st.session_state.chat_history      = []
+                st.session_state.similarity_report = None
+                st.session_state.raw_similarity    = ""
+                st.session_state.search_results    = []
+                st.session_state.upload_count     += 1
+                st.success(f"✅ New file loaded: {uploaded.name}")
+            else:
+                st.success(f"✅ {uploaded.name} (unchanged)")
+        else:
+            st.success(f"✅ {uploaded.name}")
         st.caption(
             f"{len(st.session_state.pdf_text):,} chars · "
             f"SHA-256: {st.session_state.pdf_hash[:12]}…"
@@ -843,6 +875,21 @@ with tab_similarity:
             "Internal originality audit will still run."
         )
 
+    # Show current file being audited
+    if st.session_state.pdf_name:
+        col_f, col_clr = st.columns([4, 1])
+        with col_f:
+            st.caption(
+                f"📄 Current manuscript: **{st.session_state.pdf_name}** "
+                f"· SHA-256: `{st.session_state.pdf_hash[:16]}…`"
+            )
+        with col_clr:
+            if st.button("🔄 Clear audit", help="Force clear cached results and re-run"):
+                st.session_state.similarity_report = None
+                st.session_state.raw_similarity    = ""
+                st.session_state.search_results    = []
+                st.rerun()
+
     if st.button(
         "🔍 Run Similarity & Originality Audit",
         disabled=not bool(st.session_state.pdf_base64),
@@ -881,11 +928,11 @@ with tab_similarity:
 
             sim_raw = None
             try:
-                sim_raw = call_api_with_pdf(sim_system, sim_prompt, FALLBACK_MODEL)
+                sim_raw = call_api_with_pdf(sim_system, sim_prompt, FALLBACK_MODEL, max_tok=6000)
             except Exception as e:
                 sim_status.write(f"⚠️ PDF mode failed ({e}) — using text mode…")
                 try:
-                    sim_raw = call_api_with_text(sim_system, sim_prompt, FALLBACK_MODEL)
+                    sim_raw = call_api_with_text(sim_system, sim_prompt, FALLBACK_MODEL, max_tok=6000)
                 except Exception as e2:
                     sim_status.update(label=f"Error: {e2}", state="error")
                     st.stop()
@@ -900,8 +947,28 @@ with tab_similarity:
     sim = st.session_state.similarity_report
 
     if sim is None and st.session_state.raw_similarity:
-        st.warning("Could not parse structured output — showing raw audit.")
-        st.text_area("Raw audit", st.session_state.raw_similarity, height=500)
+        # Attempt a second parse in case the first failed
+        sim = parse_json(st.session_state.raw_similarity)
+        if sim:
+            st.session_state.similarity_report = sim
+        else:
+            st.warning(
+                "The AI returned a response that could not be fully parsed. "
+                "Showing key sections below."
+            )
+            raw_sim = st.session_state.raw_similarity
+            # Try to display meaningfully even without full parse
+            st.markdown("**Raw AI Response:**")
+            # Remove JSON fences for display
+            display_text = raw_sim.replace("```json", "").replace("```", "").strip()
+            try:
+                # Try to pretty-print as JSON
+                pretty = json.dumps(json.loads(
+                    display_text[display_text.index("{"):display_text.rindex("}")+1]
+                ), indent=2)
+                st.code(pretty, language="json")
+            except Exception:
+                st.text_area("Response", display_text, height=400)
 
     elif sim:
         risk = sim.get("overall_risk_level", "Unknown")
