@@ -699,7 +699,7 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 if st.session_state.session_start is None:
-    st.session_state.session_start = datetime.datetime.now(datetime.timezone.utc)
+    st.session_state.session_start = datetime.datetime.utcnow()
 
 # ─── GATE 1: ACCESS CODE ──────────────────────────────────────────────────────
 if not st.session_state.access_granted:
@@ -862,12 +862,12 @@ def clear_session_data():
 
 def build_system_prompt(journal: str) -> str:
     import datetime
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%B %Y")
+    today = datetime.datetime.utcnow().strftime("%B %Y")
     return (
         f"You are a Senior Editor and double-blind Peer Reviewer for '{journal}', "
         "one of the most rigorous journals in Health Professions Education (HPE). "
         f"Today's date is {today}. Use this to assess citation currency accurately — "
-        f"references more than 5 years old (before {datetime.datetime.now(datetime.timezone.utc).year - 5}) "
+        f"references more than 5 years old (before {datetime.datetime.utcnow().year - 5}) "
         "should be flagged as potentially outdated unless seminal. "
         "Flag any missing references published in the last 2 years that are highly relevant. "
         "Your reviews are precise, evidence-based, and constructive. "
@@ -1743,7 +1743,7 @@ with tab_report:
                     st.session_state.agreement_log.append({
                         "verdict": verdict, "score": score,
                         "feedback": val,
-                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "timestamp": datetime.datetime.utcnow().isoformat(),
                     })
                     st.session_state.feedback_given = True
                     st.rerun()
