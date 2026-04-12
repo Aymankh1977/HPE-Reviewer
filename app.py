@@ -1,1088 +1,2247 @@
-"""
-DentEdTech Evidence Engine
-An educational AI platform for medicine, dentistry, and pharmacology students
-at Manchester University. Built on the REAL-AI framework principles.
-
-© DentEdTech - All Rights Reserved
-"""
-
 import streamlit as st
-import anthropic
+import os
+import base64
 import json
-import re
-from datetime import datetime
+import hashlib
+import datetime
+from io import BytesIO
+from docx import Document
+from docx.shared import Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from dotenv import load_dotenv
+from anthropic import Anthropic, NotFoundError
+from pypdf import PdfReader
 
-# ─── Page Config ───
+try:
+    from duckduckgo_search import DDGS
+    DDG_AVAILABLE = True
+except ImportError:
+    DDG_AVAILABLE = False
+
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="DentEdTech Evidence Engine",
-    page_icon="🔬",
+    page_title="DentEdTech™ | HPE Expert Reviewer",
+    page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ─── Custom CSS ───
+# ─── CUSTOM STYLING ───────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;1,8..60,300&family=JetBrains+Mono:wght@400;500&display=swap');
 
-/* Root variables */
+/* ── Root palette ── */
 :root {
-    --primary: #1B4D3E;
-    --primary-light: #2D7A5F;
-    --accent: #D4A853;
-    --accent-light: #E8C97A;
-    --bg-dark: #0F1A16;
-    --bg-card: #162520;
-    --bg-card-hover: #1C3029;
-    --text-primary: #E8EDE9;
-    --text-secondary: #9BAFA3;
-    --text-muted: #6B8577;
-    --border: #2D4A3E;
-    --danger: #C44B4B;
-    --warning: #D4A853;
-    --success: #4CAF7D;
+    --navy:    #0f2535;
+    --navy2:   #1a3a4a;
+    --teal:    #1d6b52;
+    --teal2:   #2d8f6f;
+    --gold:    #b5903a;
+    --ivory:   #f8f5ef;
+    --ivory2:  #f0ebe0;
+    --stone:   #e8e2d6;
+    --text:    #1a1612;
+    --text2:   #4a4540;
+    --text3:   #8a847a;
+    --white:   #ffffff;
+    --success: #1d6b52;
+    --warn:    #8a5a00;
+    --danger:  #7a2020;
 }
 
-/* Global overrides */
+/* ── Base app background ── */
 .stApp {
-    background-color: var(--bg-dark) !important;
-    color: var(--text-primary) !important;
-    font-family: 'DM Sans', sans-serif !important;
+    background: var(--ivory) !important;
+    font-family: 'Source Serif 4', Georgia, serif !important;
 }
 
-/* Hide Streamlit branding */
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden;}
-
-/* Main header */
-.main-header {
-    text-align: center;
-    padding: 2rem 1rem 1.5rem;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 2rem;
+/* ── Hide default Streamlit chrome — keep sidebar toggle visible ── */
+#MainMenu, footer { visibility: hidden !important; }
+.stDeployButton { display: none !important; }
+/* Keep the header visible but make it transparent so toggle button works */
+header[data-testid="stHeader"] {
+    background: transparent !important;
+    height: 0 !important;
+    min-height: 0 !important;
 }
-.main-header h1 {
-    font-family: 'DM Serif Display', serif !important;
-    font-size: 2.4rem !important;
-    color: var(--text-primary) !important;
-    margin: 0 !important;
-    letter-spacing: -0.02em;
-}
-.main-header .tagline {
-    font-size: 0.95rem;
-    color: var(--text-secondary);
-    margin-top: 0.3rem;
-    font-style: italic;
-}
-.brand-accent {
-    color: var(--accent) !important;
+/* Style the sidebar collapse button to match our navy theme */
+[data-testid="collapsedControl"],
+button[kind="header"] {
+    color: #0f2535 !important;
+    background: var(--ivory) !important;
 }
 
-/* Sidebar styling */
-section[data-testid="stSidebar"] {
-    background-color: var(--bg-card) !important;
-    border-right: 1px solid var(--border) !important;
-}
-section[data-testid="stSidebar"] .stMarkdown p,
-section[data-testid="stSidebar"] .stMarkdown li,
-section[data-testid="stSidebar"] label {
-    color: var(--text-secondary) !important;
-    font-family: 'DM Sans', sans-serif !important;
-}
-section[data-testid="stSidebar"] h1,
-section[data-testid="stSidebar"] h2,
-section[data-testid="stSidebar"] h3 {
-    color: var(--text-primary) !important;
-    font-family: 'DM Serif Display', serif !important;
+/* ── Main content area ── */
+.main .block-container {
+    padding: 2rem 2.5rem 3rem !important;
+    max-width: 1100px !important;
 }
 
-/* Mode selector cards */
-.mode-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.5rem;
-    margin-bottom: 1rem;
-    transition: all 0.3s ease;
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: #2c4a5a !important;
+    border-right: 1px solid rgba(255,255,255,0.08) !important;
 }
-.mode-card:hover {
-    border-color: var(--accent);
-    background: var(--bg-card-hover);
+
+/* Section label text */
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span:not([data-baseweb]),
+[data-testid="stSidebar"] .stMarkdown p {
+    color: #c8d8e0 !important;
+    font-family: 'Source Serif 4', Georgia, serif !important;
+    font-size: 0.84rem !important;
+    line-height: 1.6 !important;
 }
-.mode-card h3 {
-    font-family: 'DM Serif Display', serif !important;
-    color: var(--text-primary) !important;
-    margin-top: 0 !important;
-    font-size: 1.2rem !important;
+
+/* Headings */
+[data-testid="stSidebar"] h1 {
+    font-family: 'Playfair Display', Georgia, serif !important;
+    font-size: 1.35rem !important;
+    font-weight: 600 !important;
+    color: #eef4f8 !important;
+    letter-spacing: 0.01em !important;
+    margin-bottom: 0 !important;
 }
-.mode-card p {
-    color: var(--text-secondary) !important;
-    font-size: 0.88rem !important;
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.72rem !important;
+    font-weight: 400 !important;
+    color: #7a9aaa !important;
+    letter-spacing: 0.14em !important;
+    text-transform: uppercase !important;
+    margin: 0.8rem 0 0.4rem !important;
+}
+
+/* Captions */
+[data-testid="stSidebar"] .stCaption p {
+    color: #6a8898 !important;
+    font-size: 0.73rem !important;
+    font-style: italic !important;
+    font-family: 'Source Serif 4', serif !important;
+}
+
+/* Dividers */
+[data-testid="stSidebar"] hr {
+    border: none !important;
+    border-top: 1px solid rgba(255,255,255,0.1) !important;
+    margin: 0.75rem 0 !important;
+}
+
+/* Checkbox labels */
+[data-testid="stSidebar"] .stCheckbox label p,
+[data-testid="stSidebar"] .stCheckbox label {
+    color: #b8ccd8 !important;
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.79rem !important;
+    font-weight: 300 !important;
     line-height: 1.5 !important;
 }
 
-/* REAL-AI pillar badges */
-.pillar-badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    margin-right: 6px;
-    margin-bottom: 4px;
-}
-.pillar-r { background: rgba(76, 175, 125, 0.15); color: #4CAF7D; border: 1px solid rgba(76, 175, 125, 0.3); }
-.pillar-e { background: rgba(212, 168, 83, 0.15); color: #D4A853; border: 1px solid rgba(212, 168, 83, 0.3); }
-.pillar-a { background: rgba(100, 149, 237, 0.15); color: #6495ED; border: 1px solid rgba(100, 149, 237, 0.3); }
-.pillar-l { background: rgba(196, 75, 75, 0.15); color: #E07070; border: 1px solid rgba(196, 75, 75, 0.3); }
-
-/* Chat message styling */
-.chat-msg {
-    padding: 1.2rem 1.5rem;
-    border-radius: 12px;
-    margin-bottom: 1rem;
-    line-height: 1.7;
-    font-size: 0.92rem;
-}
-.chat-msg-user {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--accent);
-}
-.chat-msg-assistant {
-    background: rgba(27, 77, 62, 0.15);
-    border: 1px solid rgba(45, 122, 95, 0.25);
-    border-left: 3px solid var(--primary-light);
-}
-.chat-msg-system {
-    background: rgba(212, 168, 83, 0.08);
-    border: 1px solid rgba(212, 168, 83, 0.2);
-    border-left: 3px solid var(--accent);
-    font-style: italic;
+/* Selectbox label */
+[data-testid="stSidebar"] .stSelectbox label p {
+    color: #8aacbe !important;
+    font-size: 0.74rem !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+    font-family: 'Source Serif 4', serif !important;
 }
 
-/* EBL phase indicator */
-.ebl-phase {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.2rem 1.5rem;
-    margin-bottom: 1.5rem;
+/* Selectbox control */
+[data-testid="stSidebar"] [data-baseweb="select"] > div {
+    background: rgba(255,255,255,0.08) !important;
+    border: 1px solid rgba(255,255,255,0.15) !important;
+    border-radius: 3px !important;
 }
-.ebl-phase-title {
-    font-family: 'DM Serif Display', serif !important;
-    font-size: 1.1rem !important;
-    color: var(--accent) !important;
-    margin-bottom: 0.5rem !important;
-}
-.ebl-phase-desc {
-    color: var(--text-secondary) !important;
-    font-size: 0.85rem !important;
-    line-height: 1.5 !important;
+[data-testid="stSidebar"] [data-baseweb="select"] span,
+[data-testid="stSidebar"] [data-baseweb="select"] div {
+    color: #ddeaf0 !important;
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.83rem !important;
 }
 
-/* Phase stepper */
-.phase-stepper {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 1.5rem;
-    padding: 0.8rem 0;
+/* File uploader */
+[data-testid="stSidebar"] [data-testid="stFileUploader"] {
+    background: rgba(255,255,255,0.05) !important;
+    border: 1px dashed rgba(255,255,255,0.2) !important;
+    border-radius: 3px !important;
 }
-.phase-step {
-    flex: 1;
-    text-align: center;
-    position: relative;
-    padding: 0 0.5rem;
+[data-testid="stSidebar"] [data-testid="stFileUploader"] p,
+[data-testid="stSidebar"] [data-testid="stFileUploader"] span {
+    color: #9ab8c8 !important;
+    font-size: 0.8rem !important;
 }
-.phase-dot {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.75rem;
-    font-weight: 700;
-    margin-bottom: 0.4rem;
-    transition: all 0.3s ease;
-}
-.phase-dot-active {
-    background: var(--accent);
-    color: var(--bg-dark);
-}
-.phase-dot-done {
-    background: var(--success);
-    color: var(--bg-dark);
-}
-.phase-dot-pending {
-    background: var(--bg-card);
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-}
-.phase-label {
-    font-size: 0.7rem;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-}
-.phase-label-active {
-    color: var(--accent) !important;
-    font-weight: 600;
+[data-testid="stSidebar"] [data-testid="stFileUploader"] button {
+    color: #b8d4e0 !important;
+    border-color: rgba(255,255,255,0.2) !important;
+    background: rgba(255,255,255,0.07) !important;
 }
 
-/* Reflection prompt box */
-.reflection-box {
-    background: rgba(212, 168, 83, 0.06);
-    border: 1px dashed rgba(212, 168, 83, 0.35);
-    border-radius: 10px;
-    padding: 1.2rem 1.5rem;
-    margin: 1rem 0;
-}
-.reflection-box h4 {
-    color: var(--accent) !important;
-    font-family: 'DM Serif Display', serif !important;
-    font-size: 0.95rem !important;
-    margin-bottom: 0.5rem !important;
-}
-.reflection-box p {
-    color: var(--text-secondary) !important;
-    font-size: 0.85rem !important;
+/* Upload label */
+[data-testid="stSidebar"] .stFileUploader label p {
+    color: #8aacbe !important;
+    font-size: 0.74rem !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
 }
 
-/* Source cards */
-.source-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.9rem 1.1rem;
-    margin-bottom: 0.6rem;
-    font-size: 0.82rem;
-    transition: border-color 0.2s ease;
+/* Sidebar primary button — Run Analysis */
+[data-testid="stSidebar"] .stButton:nth-child(1) > button,
+[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+    background: rgba(29, 107, 82, 0.35) !important;
+    border: 1px solid rgba(45, 143, 111, 0.5) !important;
+    color: #90dfc0 !important;
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.84rem !important;
+    letter-spacing: 0.05em !important;
+    border-radius: 3px !important;
+    padding: 0.5rem 1rem !important;
+    transition: all 0.2s ease !important;
+    width: 100% !important;
 }
-.source-card:hover {
-    border-color: var(--primary-light);
-}
-.source-type {
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-weight: 600;
-    margin-bottom: 0.3rem;
-}
-.source-journal { color: var(--success); }
-.source-university { color: #6495ED; }
-.source-video { color: var(--danger); }
-
-/* Limitation notice */
-.limitation-notice {
-    background: rgba(196, 75, 75, 0.08);
-    border: 1px solid rgba(196, 75, 75, 0.2);
-    border-radius: 8px;
-    padding: 0.8rem 1rem;
-    margin-top: 1rem;
-    font-size: 0.78rem;
-    color: var(--text-muted);
-}
-.limitation-notice strong {
-    color: var(--danger);
+[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+    background: rgba(29, 107, 82, 0.55) !important;
+    color: #c0f0dc !important;
 }
 
-/* Input styling */
-.stTextArea textarea, .stTextInput input {
-    background-color: var(--bg-card) !important;
-    border: 1px solid var(--border) !important;
-    color: var(--text-primary) !important;
-    border-radius: 10px !important;
-    font-family: 'DM Sans', sans-serif !important;
-}
-.stTextArea textarea:focus, .stTextInput input:focus {
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 1px var(--accent) !important;
-}
-
-/* Button styling */
-.stButton > button {
-    background-color: var(--primary) !important;
-    color: var(--text-primary) !important;
-    border: 1px solid var(--primary-light) !important;
-    border-radius: 8px !important;
-    font-family: 'DM Sans', sans-serif !important;
-    font-weight: 500 !important;
-    padding: 0.5rem 1.5rem !important;
+/* All other sidebar buttons */
+[data-testid="stSidebar"] .stButton > button {
+    background: rgba(255,255,255,0.07) !important;
+    border: 1px solid rgba(255,255,255,0.14) !important;
+    color: #c8dde8 !important;
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.82rem !important;
+    letter-spacing: 0.04em !important;
+    border-radius: 3px !important;
+    padding: 0.45rem 1rem !important;
     transition: all 0.2s ease !important;
 }
-.stButton > button:hover {
-    background-color: var(--primary-light) !important;
-    border-color: var(--accent) !important;
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: rgba(255,255,255,0.13) !important;
+    border-color: rgba(255,255,255,0.25) !important;
+    color: #eef4f8 !important;
 }
 
-/* Selectbox */
-.stSelectbox > div > div {
-    background-color: var(--bg-card) !important;
-    border-color: var(--border) !important;
-    color: var(--text-primary) !important;
+/* Progress bar */
+[data-testid="stSidebar"] .stProgress > div {
+    background: rgba(255,255,255,0.1) !important;
+    border-radius: 2px !important;
+}
+[data-testid="stSidebar"] .stProgress > div > div {
+    background: #3d9e7a !important;
+    border-radius: 2px !important;
+}
+[data-testid="stSidebar"] .stProgress p {
+    color: #7aacbe !important;
+    font-size: 0.72rem !important;
 }
 
-/* Radio buttons */
-.stRadio label {
-    color: var(--text-secondary) !important;
+/* Expander in sidebar */
+[data-testid="stSidebar"] .streamlit-expanderHeader {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(255,255,255,0.1) !important;
+    border-radius: 3px !important;
+    color: #a8c4d0 !important;
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.8rem !important;
+    letter-spacing: 0.04em !important;
+    padding: 0.5rem 0.8rem !important;
+}
+[data-testid="stSidebar"] .streamlit-expanderHeader:hover {
+    background: rgba(255,255,255,0.1) !important;
+    color: #d8eaf4 !important;
+}
+[data-testid="stSidebar"] .streamlit-expanderContent {
+    background: rgba(255,255,255,0.03) !important;
+    border: 1px solid rgba(255,255,255,0.07) !important;
+    border-top: none !important;
+    border-radius: 0 0 3px 3px !important;
 }
 
-/* Expander */
+/* Sidebar metrics */
+[data-testid="stSidebar"] [data-testid="stMetric"] {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(255,255,255,0.1) !important;
+    border-radius: 3px !important;
+}
+[data-testid="stSidebar"] [data-testid="stMetricLabel"] p {
+    color: #6a8898 !important;
+    font-size: 0.68rem !important;
+    letter-spacing: 0.1em !important;
+}
+[data-testid="stSidebar"] [data-testid="stMetricValue"] {
+    color: #cce0ea !important;
+    font-family: 'Playfair Display', serif !important;
+    font-size: 1.3rem !important;
+}
+
+/* Sidebar markdown tables */
+[data-testid="stSidebar"] table {
+    font-size: 0.75rem !important;
+    color: #a8c0cc !important;
+    border-color: rgba(255,255,255,0.1) !important;
+}
+[data-testid="stSidebar"] td, [data-testid="stSidebar"] th {
+    color: #a8c0cc !important;
+    border-color: rgba(255,255,255,0.08) !important;
+    padding: 0.25rem 0.5rem !important;
+}
+
+/* Sidebar alerts */
+[data-testid="stSidebar"] .stAlert {
+    background: rgba(255,255,255,0.06) !important;
+    border-radius: 3px !important;
+}
+[data-testid="stSidebar"] .stAlert p {
+    color: #c8d8e0 !important;
+    font-size: 0.78rem !important;
+}
+
+/* ── Main headings ── */
+h1, h2, h3 {
+    font-family: 'Playfair Display', Georgia, serif !important;
+    color: var(--navy) !important;
+    letter-spacing: -0.01em !important;
+}
+h1 { font-size: 2rem !important; font-weight: 600 !important; }
+h2 { font-size: 1.35rem !important; font-weight: 600 !important; }
+h3 { font-size: 1.1rem !important; font-weight: 400 !important; font-style: italic !important; }
+
+p, li, label { font-family: 'Source Serif 4', Georgia, serif !important; }
+
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] {
+    background: transparent !important;
+    border-bottom: 1px solid var(--stone) !important;
+    gap: 0 !important;
+}
+.stTabs [data-baseweb="tab"] {
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.82rem !important;
+    font-weight: 400 !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+    color: var(--text3) !important;
+    padding: 0.7rem 1.4rem !important;
+    border-bottom: 2px solid transparent !important;
+    background: transparent !important;
+}
+.stTabs [aria-selected="true"] {
+    color: var(--navy) !important;
+    border-bottom: 2px solid var(--gold) !important;
+    font-weight: 400 !important;
+}
+.stTabs [data-baseweb="tab-panel"] {
+    padding-top: 1.5rem !important;
+}
+
+/* ── Expanders ── */
 .streamlit-expanderHeader {
-    background-color: var(--bg-card) !important;
-    color: var(--text-primary) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.9rem !important;
+    font-weight: 400 !important;
+    color: var(--navy2) !important;
+    background: var(--white) !important;
+    border: 1px solid var(--stone) !important;
+    border-radius: 4px !important;
+    padding: 0.6rem 1rem !important;
+    letter-spacing: 0.01em !important;
+}
+.streamlit-expanderHeader:hover {
+    background: var(--ivory2) !important;
+}
+.streamlit-expanderContent {
+    border: 1px solid var(--stone) !important;
+    border-top: none !important;
+    border-radius: 0 0 4px 4px !important;
+    background: var(--white) !important;
+    padding: 1rem 1.2rem !important;
 }
 
-/* Divider */
-.section-divider {
-    border: none;
-    border-top: 1px solid var(--border);
-    margin: 1.5rem 0;
+/* ── Metrics ── */
+[data-testid="stMetric"] {
+    background: var(--white) !important;
+    border: 1px solid var(--stone) !important;
+    border-radius: 4px !important;
+    padding: 0.75rem 1rem !important;
+}
+[data-testid="stMetricLabel"] {
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.72rem !important;
+    letter-spacing: 0.1em !important;
+    text-transform: uppercase !important;
+    color: var(--text3) !important;
+}
+[data-testid="stMetricValue"] {
+    font-family: 'Playfair Display', serif !important;
+    font-size: 1.6rem !important;
+    color: var(--navy) !important;
 }
 
-/* Footer */
-.app-footer {
-    text-align: center;
-    padding: 1.5rem;
-    border-top: 1px solid var(--border);
-    margin-top: 2rem;
-    color: var(--text-muted);
-    font-size: 0.75rem;
+/* ── Buttons (main content) ── */
+.stButton > button {
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.85rem !important;
+    letter-spacing: 0.06em !important;
+    border-radius: 3px !important;
+    border: 1px solid var(--stone) !important;
+    background: var(--white) !important;
+    color: var(--navy2) !important;
+    padding: 0.5rem 1.2rem !important;
+    transition: all 0.18s ease !important;
+}
+.stButton > button:hover {
+    background: var(--ivory2) !important;
+    border-color: var(--navy2) !important;
+}
+
+/* ── Download buttons ── */
+.stDownloadButton > button {
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.82rem !important;
+    letter-spacing: 0.05em !important;
+    border-radius: 3px !important;
+    background: var(--navy) !important;
+    color: #e8e0d0 !important;
+    border: none !important;
+    padding: 0.5rem 1.2rem !important;
+    transition: background 0.18s ease !important;
+}
+.stDownloadButton > button:hover {
+    background: var(--navy2) !important;
+}
+
+/* ── Text inputs ── */
+.stTextInput input, .stSelectbox select,
+[data-baseweb="select"] {
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.88rem !important;
+    border-radius: 3px !important;
+    border: 1px solid var(--stone) !important;
+    background: var(--white) !important;
+    color: var(--text) !important;
+}
+.stTextInput input:focus {
+    border-color: var(--navy2) !important;
+    box-shadow: 0 0 0 2px rgba(26,58,74,0.1) !important;
+}
+
+/* ── Chat input ── */
+.stChatInput textarea {
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.88rem !important;
+    border-radius: 3px !important;
+    border: 1px solid var(--stone) !important;
+}
+
+/* ── Chat messages ── */
+[data-testid="stChatMessage"] {
+    background: var(--white) !important;
+    border: 1px solid var(--stone) !important;
+    border-radius: 4px !important;
+    padding: 0.75rem 1rem !important;
+}
+
+/* ── Info / Warning / Success / Error boxes ── */
+.stAlert {
+    border-radius: 3px !important;
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.87rem !important;
+    border-left-width: 3px !important;
+}
+[data-testid="stInfoMessage"] {
+    background: #f0f4f8 !important;
+    border-left-color: var(--navy2) !important;
+    color: var(--navy) !important;
+}
+[data-testid="stWarningMessage"] {
+    background: #fdf6e3 !important;
+    border-left-color: var(--gold) !important;
+    color: #5a4010 !important;
+}
+[data-testid="stSuccessMessage"] {
+    background: #f0f8f4 !important;
+    border-left-color: var(--teal) !important;
+    color: #0f3a28 !important;
+}
+[data-testid="stErrorMessage"] {
+    background: #fdf0f0 !important;
+    border-left-color: var(--danger) !important;
+}
+
+/* ── Progress bar ── */
+.stProgress > div > div {
+    background: var(--teal) !important;
+    border-radius: 2px !important;
+}
+.stProgress > div {
+    background: var(--stone) !important;
+    border-radius: 2px !important;
+}
+
+/* ── Captions ── */
+.stCaption, .stCaption p {
+    font-family: 'Source Serif 4', serif !important;
+    font-style: italic !important;
+    color: var(--text3) !important;
+    font-size: 0.78rem !important;
+}
+
+/* ── Markdown text ── */
+.stMarkdown p {
+    font-family: 'Source Serif 4', Georgia, serif !important;
+    font-size: 0.92rem !important;
+    line-height: 1.75 !important;
+    color: var(--text2) !important;
+}
+.stMarkdown blockquote {
+    border-left: 3px solid var(--gold) !important;
+    background: var(--ivory2) !important;
+    padding: 0.8rem 1.2rem !important;
+    border-radius: 0 3px 3px 0 !important;
+    font-style: italic !important;
+    color: var(--text) !important;
+}
+.stMarkdown code {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.78rem !important;
+    background: var(--ivory2) !important;
+    color: var(--navy2) !important;
+    padding: 0.1em 0.4em !important;
+    border-radius: 2px !important;
+}
+
+/* ── Dividers ── */
+hr {
+    border: none !important;
+    border-top: 1px solid var(--stone) !important;
+    margin: 1.2rem 0 !important;
+}
+
+/* ── Selectbox ── */
+[data-baseweb="select"] > div {
+    border-radius: 3px !important;
+    border-color: var(--stone) !important;
+    background: var(--white) !important;
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.85rem !important;
+}
+
+/* ── File uploader ── */
+[data-testid="stFileUploader"] {
+    border: 1px dashed var(--stone) !important;
+    border-radius: 4px !important;
+    background: var(--white) !important;
+    padding: 0.5rem !important;
+}
+[data-testid="stFileUploader"]:hover {
+    border-color: var(--navy2) !important;
+    background: var(--ivory2) !important;
+}
+
+/* ── Status widget ── */
+[data-testid="stStatusWidget"] {
+    font-family: 'Source Serif 4', serif !important;
+    font-size: 0.85rem !important;
+    border-radius: 3px !important;
+    border: 1px solid var(--stone) !important;
+}
+
+/* ── Spinner ── */
+.stSpinner > div {
+    border-top-color: var(--navy) !important;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--ivory2); }
+::-webkit-scrollbar-thumb { background: var(--stone); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text3); }
+
+/* ── Checkbox ── */
+.stCheckbox [data-testid="stCheckbox"] {
+    accent-color: var(--teal) !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
+# ─── API KEY ──────────────────────────────────────────────────────────────────
+try:
+    api_key = st.secrets.get("ANTHROPIC_API_KEY")
+except Exception:
+    api_key = None
 
-# ─── System Prompts ───
+if not api_key:
+    load_dotenv()
+    api_key = os.getenv("ANTHROPIC_API_KEY")
 
-EVIDENCE_SYSTEM_PROMPT = """You are the DentEdTech Evidence Engine, an educational AI assistant for medicine, dentistry, and pharmacology students at the University of Manchester. You operate under the REAL-AI framework principles.
+if not api_key:
+    st.error("🚨 ANTHROPIC_API_KEY is missing. Add it to `.env` or Streamlit Secrets.")
+    st.stop()
 
-## YOUR STRICT SOURCE CONSTRAINTS
-You may ONLY provide information from these source types:
-1. **Scientific journals** (PubMed-indexed, peer-reviewed): e.g., Journal of Dental Research, The Lancet, BMJ, NEJM, Journal of Dental Education, European Journal of Dental Education, British Dental Journal, Journal of Clinical Pharmacology, etc.
-2. **University websites** (.ac.uk, .edu domains): e.g., University of Manchester, NHS education resources, university course materials.
-3. **Authentic YouTube channels**: Only channels run by universities, professional medical/dental bodies (BDA, GDC, NHS, Royal Colleges), or verified educational creators with professional credentials.
+client = Anthropic(api_key=api_key)
 
-You must NEVER cite Wikipedia, blogs, commercial health sites, social media, or unverified sources.
+# ─── MODELS ───────────────────────────────────────────────────────────────────
+PRIMARY_MODEL  = "claude-opus-4-5"
+FALLBACK_MODEL = "claude-sonnet-4-5"
+CHAT_MODEL     = "claude-haiku-4-5-20251001"
 
-## REAL-AI FRAMEWORK INTEGRATION
+# ─── ACCESS CONTROL ───────────────────────────────────────────────────────────
+# One unique code per pilot partner. Add/remove as partnerships change.
+# Share each code privately with the respective journal contact only.
+VALID_ACCESS_CODES = {
+    # ── Your personal / admin access (unlimited analyses) ─────────
+    "DEMO-ACCESS":          "Demo / Internal Use",
+    "DENTEDTECH-ADMIN":     "DentEdTech Admin",
+    "DENTEDTECH-OWNER":     "DentEdTech Owner",
+    # ── ISI / Web of Science Indexed ──────────────────────────────
+    "MEDED-PILOT-2025":     "Medical Education (ISI)",
+    "ACADMED-PILOT-2025":   "Academic Medicine (ISI)",
+    "MT-PILOT-2025":        "Medical Teacher (ISI)",
+    "AHSE-PILOT-2025":      "Advances in Health Sciences Education (ISI)",
+    "JDR-PILOT-2025":       "Journal of Dental Research (ISI)",
+    "CDOE-PILOT-2025":      "Community Dentistry and Oral Epidemiology (ISI)",
+    "EJOS-PILOT-2025":      "European Journal of Oral Sciences (ISI)",
+    "JDS-PILOT-2025":       "Journal of Dental Sciences (ISI)",
+    # ── Scopus Indexed ────────────────────────────────────────────
+    "BMC-PILOT-2025":       "BMC Medical Education (Scopus)",
+    "JGME-PILOT-2025":      "JGME Journal of Graduate Medical Education (Scopus)",
+    "TLM-PILOT-2025":       "Teaching and Learning in Medicine (Scopus)",
+    "IJME-PILOT-2025":      "International Journal of Medical Education (Scopus)",
+    "GMS-PILOT-2025":       "GMS Journal for Medical Education (Scopus)",
+    "EFH-PILOT-2025":       "Education for Health (Scopus)",
+    "JEEHP-PILOT-2025":     "Journal of Educational Evaluation for Health Professions (Scopus)",
+    "MEP-PILOT-2025":       "MedEdPublish (Scopus)",
+    "DENTJ-PILOT-2025":     "Dentistry Journal MDPI (Scopus)",
+    # ── Dental Education Specialist ───────────────────────────────
+    "JDE-PILOT-2025":       "Journal of Dental Education (JDE)",
+    "EJDE-PILOT-2025":      "European Journal of Dental Education (EJDE)",
+    "BDJ-PILOT-2025":       "British Dental Journal (BDJ)",
+    "JDENT-PILOT-2025":     "Journal of Dentistry",
+    "ADEE-PILOT-2025":      "Dental Education Today (ADEE)",
+    "JDHE-PILOT-2025":      "Journal of Dental Hygiene Education",
+}
 
-### Pillar 1 — Reflective Integration
-Before providing evidence, ALWAYS ask the student:
-- "What do you already know about this topic?"
-- "What do you expect the evidence might show?"
-Only after they respond should you provide the full evidence-based answer. If they insist on a direct answer, gently explain why reflection first produces deeper learning, then provide the answer with a post-reflection prompt.
+# Admin codes — these get unlimited analyses (no session cap)
+ADMIN_CODES = {"DEMO-ACCESS", "DENTEDTECH-ADMIN", "DENTEDTECH-OWNER"}
 
-### Pillar 2 — Equity by Design
-- Present diverse perspectives and global evidence where relevant
-- Note when evidence may be limited to specific populations
-- Use inclusive language and consider accessibility
+# Max AI analyses allowed per session for non-admin partners
+SESSION_ANALYSIS_CAP = 5
 
-### Pillar 3 — Authentic Clinical Alignment
-- Always state the clinical relevance of evidence
-- Include a **⚠️ Limitations** section noting what the evidence does NOT cover
-- Flag when simulated/in-vitro evidence may not transfer to clinical settings
-- Be transparent: "This AI response is a learning aid, not clinical advice"
+# ─── JOURNALS ─────────────────────────────────────────────────────────────────
+JOURNALS = [
+    # ISI / Web of Science Indexed
+    "Medical Education (ISI)",
+    "Academic Medicine (ISI)",
+    "Medical Teacher (ISI)",
+    "Advances in Health Sciences Education (ISI)",
+    "Journal of Dental Research (ISI)",
+    "Community Dentistry and Oral Epidemiology (ISI)",
+    "European Journal of Oral Sciences (ISI)",
+    "Journal of Dental Sciences (ISI)",
+    # Scopus Indexed
+    "BMC Medical Education (Scopus)",
+    "JGME – Journal of Graduate Medical Education (Scopus)",
+    "Teaching and Learning in Medicine (Scopus)",
+    "International Journal of Medical Education – IJME (Scopus)",
+    "GMS Journal for Medical Education (Scopus)",
+    "Education for Health (Scopus)",
+    "Journal of Educational Evaluation for Health Professions (Scopus)",
+    "MedEdPublish (Scopus)",
+    "Dentistry Journal – MDPI (Scopus)",
+    # Dental Education Specialist
+    "Journal of Dental Education (JDE)",
+    "European Journal of Dental Education (EJDE)",
+    "British Dental Journal (BDJ)",
+    "Journal of Dentistry",
+    "Dental Education Today (ADEE)",
+    "Journal of Dental Hygiene Education",
+]
 
-### Pillar 4 — Learning-Centred Partnership
-- Encourage the student to discuss findings with faculty
-- Suggest how they might verify or extend the information
-- Prompt: "How might you apply this in your next clinical session?"
+# ─── REVIEW CRITERIA ──────────────────────────────────────────────────────────
+REVIEW_CRITERIA = {
+    "research_question": "Research question clarity & PICO/SPIDER framing",
+    "methodology":       "Methodology rigor & reproducibility",
+    "consort_srqr":      "CONSORT / SRQR / COREQ guideline adherence",
+    "kirkpatrick":       "Kirkpatrick level outcomes achieved",
+    "citations":         "Citation currency, completeness & in-text accuracy",
+    "statistics":        "Statistical / qualitative data analysis soundness",
+    "ethics":            "Ethical considerations & positionality",
+    "golden_thread":     "Golden thread coherence (RQ → method → results → conclusion)",
+}
 
-## RESPONSE FORMAT
-Structure your evidence-based responses as follows:
+# ─── SESSION STATE ─────────────────────────────────────────────────────────────
+# Increment this version string any time you want to force all sessions to reset
+# (e.g. after a major deployment that adds new gates or changes access logic)
+APP_VERSION = "2.1.0"
 
-**📋 Pre-Reflection Prompt** (always first, unless student has already reflected)
+defaults = {
+    "access_granted":        False,
+    "access_partner":        "",
+    "is_admin":              False,
+    "consent_given":         False,
+    "analyses_this_session": 0,
+    "pdf_base64":            None,
+    "pdf_name":              "",
+    "pdf_hash":              "",
+    "pdf_text":              "",
+    "report":                None,
+    "raw_report":            "",
+    "chat_history":          [],
+    "model_used":            "",
+    "session_start":         None,
+    "upload_count":          0,
+    "similarity_report":     None,
+    "raw_similarity":        "",
+    "search_results":        [],
+    "agreement_log":         [],
+    "feedback_given":        False,
+    "feedback_submitted":    False,
+    "_app_version":          APP_VERSION,
+}
 
-Then after reflection:
+# Force full session reset if app version has changed
+if st.session_state.get("_app_version") != APP_VERSION:
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
 
-**🔬 Evidence Summary**
-Synthesise the key findings in clear, accessible language.
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-**📚 Key Sources**
-List 3-5 specific references with:
-- Author(s), Year, Title
-- Journal name
-- DOI or URL where available
-- Brief note on evidence quality (RCT, systematic review, cohort study, etc.)
+if st.session_state.session_start is None:
+    st.session_state.session_start = datetime.datetime.utcnow()
 
-**🎓 University Resources**
-Link to relevant Manchester or other university learning materials if applicable.
+# ─── GATE 1: ACCESS CODE ──────────────────────────────────────────────────────
+if not st.session_state.access_granted:
+    st.markdown(
+        """
+        <div style="max-width:480px;margin:6rem auto 2rem;text-align:center;">
+          <div style="font-family:'Playfair Display',Georgia,serif;
+                      font-size:0.7rem;letter-spacing:0.3em;text-transform:uppercase;
+                      color:#8a9aaa;margin-bottom:1.5rem;">
+            Health Professions Education
+          </div>
+          <h1 style="font-family:'Playfair Display',Georgia,serif;
+                     font-size:2.6rem;font-weight:600;color:#0f2535;
+                     margin:0 0 0.3rem;letter-spacing:-0.02em;">
+            DentEdTech™
+          </h1>
+          <div style="font-family:'Source Serif 4',Georgia,serif;
+                      font-size:1rem;font-weight:300;font-style:italic;
+                      color:#6a7a8a;margin-bottom:2.5rem;">
+            Manuscript Intelligence Platform
+          </div>
+          <div style="width:40px;height:1px;background:#b5903a;margin:0 auto 2.5rem;"></div>
+          <p style="font-family:'Source Serif 4',Georgia,serif;
+                    font-size:0.88rem;color:#4a4540;line-height:1.8;margin-bottom:2rem;">
+            This platform is available to <strong>approved pilot partners</strong> only.<br>
+            Please enter your institutional access code to continue.
+          </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        code_input = st.text_input(
+            "Access code",
+            placeholder="Enter your access code",
+            type="password",
+            label_visibility="collapsed",
+        )
+        if st.button("Enter Platform →", use_container_width=True):
+            code = code_input.strip().upper()
+            if code in VALID_ACCESS_CODES:
+                st.session_state.access_granted = True
+                st.session_state.access_partner = VALID_ACCESS_CODES[code]
+                st.session_state.is_admin       = code in ADMIN_CODES
+                st.rerun()
+            else:
+                st.error(
+                    "Invalid access code. If you are a pilot partner and have not received "
+                    "your code, please contact [your email address]."
+                )
+        st.markdown(
+            "<div style='text-align:center;margin-top:1.5rem;"
+            "font-family:Source Serif 4,serif;font-size:0.78rem;"
+            "font-style:italic;color:#8a847a;'>"
+            "Not a pilot partner? <a href='mailto:your@email.com' "
+            "style='color:#1a3a4a;'>Contact us</a> to discuss a partnership.</div>",
+            unsafe_allow_html=True,
+        )
+    st.stop()
 
-**🎥 Recommended Video**
-Suggest 1-2 authentic YouTube videos from verified channels (university lectures, Royal College presentations, BDA/GDC content, etc.). Include channel name and why it's trustworthy.
+# ─── GATE 2: CONSENT ──────────────────────────────────────────────────────────
+if not st.session_state.consent_given:
+    st.markdown(
+        f"""
+        <div style="max-width:600px;margin:5rem auto 2rem;">
+          <div style="font-family:'Playfair Display',Georgia,serif;
+                      font-size:0.7rem;letter-spacing:0.3em;text-transform:uppercase;
+                      color:#8a9aaa;margin-bottom:1rem;text-align:center;">
+            Health Professions Education
+          </div>
+          <h1 style="font-family:'Playfair Display',Georgia,serif;font-size:2.2rem;
+                     font-weight:600;color:#0f2535;margin:0 0 0.2rem;
+                     letter-spacing:-0.02em;text-align:center;">
+            DentEdTech™
+          </h1>
+          <div style="font-family:'Source Serif 4',Georgia,serif;font-size:0.9rem;
+                      font-style:italic;color:#6a7a8a;text-align:center;margin-bottom:0.8rem;">
+            Manuscript Intelligence Platform
+          </div>
+          <div style="width:40px;height:1px;background:#b5903a;margin:0 auto 2rem;"></div>
+          <div style="background:#f8f5ef;border:1px solid #e8e2d6;border-radius:4px;
+                      padding:1.5rem 1.8rem;margin-bottom:1.5rem;">
+            <div style="font-family:'Source Serif 4',serif;font-size:0.75rem;
+                        letter-spacing:0.12em;text-transform:uppercase;color:#1d6b52;
+                        margin-bottom:0.8rem;">
+              ✓ Access granted &mdash; {st.session_state.access_partner}
+            </div>
+            <div style="font-family:'Playfair Display',serif;font-size:1rem;
+                        font-weight:600;color:#0f2535;margin-bottom:1rem;">
+              Data &amp; Confidentiality Notice
+            </div>
+            <ul style="font-family:'Source Serif 4',Georgia,serif;font-size:0.86rem;
+                       line-height:1.9;color:#4a4540;padding-left:1.2rem;margin:0;">
+              <li>Manuscripts are transmitted to <strong>Anthropic's API</strong> for analysis.
+                  Anthropic does <strong>not</strong> train models on API data.</li>
+              <li>Documents are held <strong>in memory only</strong> — never written to disk.</li>
+              <li>Your session clears automatically when you close the browser tab.</li>
+              <li>Do <strong>not</strong> upload manuscripts containing patient-identifiable
+                  data or material under confidentiality agreement.</li>
+            </ul>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        confirmed = st.checkbox(
+            "I have read the data notice above and confirm the manuscript I will upload "
+            "does not contain restricted or patient-identifiable data."
+        )
+        if st.button("Accept & Continue →", disabled=not confirmed, use_container_width=True):
+            st.session_state.consent_given = True
+            st.rerun()
+    st.stop()
 
-**⚠️ Limitations & Transparency**
-- What this evidence does NOT tell us
-- Any biases or gaps in the literature
-- "This AI-generated summary should be verified against primary sources"
+# ─── GATE 3: SESSION CAP ──────────────────────────────────────────────────────
+def check_session_cap() -> bool:
+    """Returns True if user can run another analysis. Admin users are always True."""
+    if st.session_state.is_admin:
+        return True
+    return st.session_state.analyses_this_session < SESSION_ANALYSIS_CAP
 
-**🤔 Post-Learning Reflection**
-End with a reflective question: "Now that you've seen this evidence, how does it change or confirm your initial thinking?"
+def show_cap_warning():
+    if st.session_state.is_admin:
+        return   # no warning for admin
+    remaining = SESSION_ANALYSIS_CAP - st.session_state.analyses_this_session
+    if remaining <= 1:
+        st.warning(
+            f"⚠️ You have **{remaining} analysis remaining** in this session. "
+            f"This platform is currently in pilot phase — please contact "
+            f"[DentEdTech™](mailto:your@email.com) to discuss extended access."
+        )
 
-## CRITICAL RULES
-- If you cannot find strong evidence from approved sources, say so honestly and suggest the most relevant authentic YouTube video as a starting point
-- Never fabricate references — if unsure, say "I recommend searching PubMed for [specific terms]"
-- Always distinguish between levels of evidence (systematic review > RCT > cohort > case report > expert opinion)
-- When using web search, prioritise PubMed, university repositories, and professional body websites"""
-
-
-EBL_SYSTEM_PROMPT = """You are the DentEdTech Enquiry-Based Learning (EBL) Facilitator. You guide medicine, dentistry, and pharmacology students through structured inquiry WITHOUT giving them direct answers or direct evidence. You operate under the REAL-AI framework.
-
-## YOUR ROLE
-You are a Socratic facilitator. Your job is to help students develop the PROCESS of inquiry, not to hand them conclusions. You must resist every temptation to provide direct answers, even when asked.
-
-## THE HYBRID EBL MODEL
-You guide students through a 5-phase inquiry cycle that combines a forming-storming-questioning model with Kolb's experiential learning:
-
-### Phase 1: FORMING (Concrete Experience → Orientation)
-Purpose: Encounter the problem and activate prior knowledge
-Your prompts should:
-- Present or help frame the clinical scenario/problem
-- Ask: "What is your first reaction to this case?"
-- Ask: "What do you already know that might be relevant?"
-- Ask: "What feels familiar here, and what feels new or confusing?"
-- Help students identify the BOUNDARIES of their current knowledge
-DO NOT: Provide background information or context they haven't asked about
-
-### Phase 2: STORMING (Reflective Observation → Divergent Thinking)
-Purpose: Generate multiple perspectives and hypotheses
-Your prompts should:
-- Ask: "What are ALL the possible explanations? Don't filter yet."
-- Ask: "What would a [periodontist/pharmacologist/radiologist] notice here that you might miss?"
-- Ask: "What assumptions are you making? Can you name them?"
-- Challenge groupthink: "You've all agreed quickly — what's the counterargument?"
-- Encourage: "What if the opposite of your hypothesis were true?"
-DO NOT: Validate or invalidate their hypotheses. Let ambiguity sit.
-
-### Phase 3: QUESTIONING (Abstract Conceptualisation → Inquiry Design)
-Purpose: Transform uncertainty into structured research questions
-Your prompts should:
-- Ask: "What specific questions do you need answered to move forward?"
-- Help refine vague questions into searchable, answerable ones
-- Ask: "Is this a question about mechanism, prevalence, treatment efficacy, or prognosis?"
-- Guide PICO/PEO framework: "Who is the patient? What's the intervention? What are you comparing to? What outcome matters?"
-- Ask: "How would you rank these questions by importance to the case?"
-DO NOT: Provide the questions. Help them BUILD the questions themselves.
-
-### Phase 4: SEEKING (Active Experimentation → Evidence Navigation)
-Purpose: Learn WHERE and HOW to find evidence
-Your prompts should:
-- Ask: "Where would you look first? Why that source?"
-- Guide search strategy: "What search terms would you use? How might you combine them?"
-- Ask: "What type of evidence would best answer your question — a systematic review? An RCT? Clinical guidelines?"
-- Prompt critical appraisal: "If you find a study, what would you check first to judge its quality?"
-- Suggest databases WITHOUT searching for them: "PubMed, Cochrane Library, NICE guidelines — which fits your question type?"
-- If stuck: "What if you searched [broader/narrower term]? What Boolean operators might help?"
-DO NOT: Search for evidence, provide links, or summarise findings. Guide them to the water; don't pour it.
-
-### Phase 5: SYNTHESISING (Reflection → Integration)
-Purpose: Connect evidence back to the original problem
-Your prompts should:
-- Ask: "What did you find? How does it relate to the original case?"
-- Ask: "Did the evidence confirm or challenge your initial thinking?"
-- Ask: "What would you do differently next time you approach a similar case?"
-- Ask: "What gaps remain? What would you want to investigate further?"
-- Ask: "How would you explain your findings to the patient?"
-- Prompt Kolb closure: "What's one principle you'll carry forward from this inquiry?"
-DO NOT: Provide a summary. The student must synthesise.
-
-## REAL-AI INTEGRATION
-
-### Pillar 1 — Reflective Integration
-- Every phase transition includes a reflection checkpoint
-- Never provide terminal answers — always respond with a guiding question
-- Use "What makes you think that?" before "Have you considered...?"
-
-### Pillar 2 — Equity by Design
-- In Phase 2, prompt consideration of diverse patient populations
-- Ask: "Would this case unfold differently for a patient from a different background?"
-- Encourage consideration of health inequalities and social determinants
-
-### Pillar 3 — Authentic Clinical Alignment
-- Ground all scenarios in realistic clinical contexts
-- Ask: "In a real clinic, what constraints would you face that this scenario doesn't capture?"
-- Remind students of the gap between textbook cases and clinical reality
-
-### Pillar 4 — Learning-Centred Partnership
-- Explicitly name when you're holding back an answer and why
-- Encourage them to bring findings to their tutor/supervisor
-- Normalise uncertainty: "Not knowing is the starting point of inquiry, not a failure"
-
-## PHASE TRACKING
-Always indicate which phase the student is in and when it's time to progress.
-Use this format at the start of each response:
-📍 **Phase [N]: [PHASE NAME]**
-
-When transitioning, explain why: "You've generated strong questions — let's move to thinking about where to find answers."
-
-## CRITICAL RULES
-- NEVER provide direct evidence, citations, or links in EBL mode
-- NEVER answer their clinical questions directly
-- If they demand answers, explain: "In EBL, the process of finding the answer IS the learning. I can guide your search strategy, but the discovery needs to be yours."
-- If they're truly stuck, offer a HINT (not an answer): "Consider looking at the mechanism of action..." not "The mechanism is..."
-- You may provide a case scenario if the student asks for one to practise with
-- Always maintain warmth and encouragement — inquiry is hard, and struggle is productive"""
-
-
-# ─── Session State Initialization ───
-def init_session():
-    defaults = {
-        "mode": None,
-        "evidence_messages": [],
-        "ebl_messages": [],
-        "ebl_phase": 1,
-        "ebl_case": None,
-        "reflection_given": False,
-        "discipline": "Dentistry",
-        "year_of_study": "Year 3",
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-init_session()
-
-
-# ─── Helper Functions ───
-
-def get_api_key():
-    """Get API key from sidebar or secrets."""
-    if "api_key" in st.session_state and st.session_state.api_key:
-        return st.session_state.api_key
-    return None
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
+def encode_pdf(uploaded_file) -> tuple[str, str, str]:
+    raw = uploaded_file.read()
+    b64 = base64.standard_b64encode(raw).decode("utf-8")
+    sha = hashlib.sha256(raw).hexdigest()
+    try:
+        reader = PdfReader(BytesIO(raw))
+        text = "\n".join(p.extract_text() or "" for p in reader.pages)
+    except Exception:
+        text = ""
+    return b64, text, sha
 
 
-def call_claude(messages, system_prompt, use_search=False):
-    """Call Claude API with optional web search."""
-    api_key = get_api_key()
-    if not api_key:
-        return "⚠️ Please enter your Anthropic API key in the sidebar to continue."
+def clear_session_data():
+    sensitive_keys = [
+        "pdf_base64", "pdf_name", "pdf_hash", "pdf_text",
+        "report", "raw_report", "chat_history", "model_used",
+        "similarity_report", "raw_similarity", "search_results",
+        "feedback_given",
+    ]
+    for k in sensitive_keys:
+        st.session_state[k] = defaults[k]
+    st.session_state.upload_count = 0
 
-    client = anthropic.Anthropic(api_key=api_key)
 
-    kwargs = {
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 4096,
-        "system": system_prompt,
-        "messages": messages,
-    }
+def build_system_prompt(journal: str) -> str:
+    return (
+        f"You are a Senior Editor and double-blind Peer Reviewer for '{journal}', "
+        "one of the most rigorous journals in Health Professions Education (HPE). "
+        "Your reviews are precise, evidence-based, and constructive. "
+        "You quote exact passages from the manuscript to substantiate every criticism. "
+        "You never fabricate content. "
+        "You apply CONSORT for RCTs, SRQR for qualitative research, COREQ for interviews/focus groups, "
+        "and always evaluate educational outcomes through Kirkpatrick's four-level framework. "
+        "You scrutinise the golden thread: the logical chain from research question through "
+        "methodology, results, and conclusion. "
+        "You identify citation gaps, outdated references, and in-text vs reference-list mismatches. "
+        "When you are uncertain about a verdict due to ambiguous methodology or borderline quality, "
+        "you MUST flag this explicitly in the confidence field."
+    )
 
-    if use_search:
-        kwargs["tools"] = [
-            {
-                "type": "web_search_20250305",
-                "name": "web_search",
-            }
-        ]
+
+def build_review_prompt(selected_criteria: list[str], journal: str) -> str:
+    criteria_block = "\n".join(
+        f"  {i+1}. {REVIEW_CRITERIA[c]}"
+        for i, c in enumerate(selected_criteria)
+    )
+    return f"""Perform a comprehensive peer review of this manuscript submitted to '{journal}'.
+
+SELECTED REVIEW CRITERIA:
+{criteria_block}
+
+CONFIDENCE INSTRUCTION:
+After forming your verdict, assess your own confidence. If the manuscript is borderline,
+if the methodology is ambiguous, or if the verdict could reasonably go either way,
+set confidence to Moderate or Low and explain in confidence_note.
+Only set High if the verdict is clear and unambiguous.
+
+Return ONLY a valid JSON object — no markdown fences, no preamble:
+
+{{
+  "verdict": "Accept | Minor Revisions | Major Revisions | Reject",
+  "overall_score": <integer 1-100>,
+  "confidence": "High | Moderate | Low",
+  "confidence_note": "<what is uncertain and why the editor should verify>",
+  "executive_summary": "<2-3 sentence overall assessment>",
+  "scores": {{
+    "novelty": <1-10>,
+    "methodology": <1-10>,
+    "clarity": <1-10>,
+    "citations": <1-10>,
+    "ethics": <1-10>
+  }},
+  "strengths": ["<strength>"],
+  "weaknesses": [
+    {{
+      "section": "Abstract|Introduction|Methods|Results|Discussion|Citations",
+      "issue": "<specific issue quoting the manuscript>",
+      "severity": "major|minor",
+      "suggestion": "<concrete fix>"
+    }}
+  ],
+  "section_comments": {{
+    "abstract": "<comment>",
+    "introduction": "<gap identified? citations current? RQ explicit?>",
+    "methods": "<reproducibility, guideline adherence, sample size>",
+    "results": "<clarity, alignment with RQ>",
+    "discussion": "<overstating? Kirkpatrick level? golden thread?>"
+  }},
+  "golden_thread": "<RQ to methodology to results to conclusion coherence>",
+  "kirkpatrick_level": {{
+    "level": <1|2|3|4>,
+    "justification": "<why>"
+  }},
+  "citation_audit": {{
+    "missing_key_references": ["<Author Year — why relevant>"],
+    "potentially_outdated": ["<citation — reason>"],
+    "mismatches": "<issues or None identified>"
+  }},
+  "actionable_recommendations": ["<specific action>"],
+  "author_feedback_summary": "<2-3 constructive sentences to authors — encouraging, focused on improvement, no verdict mentioned>",
+  "editor_note": "<confidential note to editor only>"
+}}"""
+
+
+def build_similarity_prompt(search_results: list[dict]) -> str:
+    search_block = ""
+    if search_results:
+        search_block = "\n\nSIMILAR PUBLISHED PAPERS FOUND ONLINE:\n"
+        for i, r in enumerate(search_results, 1):
+            search_block += (
+                f"\n[{i}] Title: {r['title']}\n"
+                f"    URL: {r['url']}\n"
+                f"    Summary: {r['body'][:300]}\n"
+            )
+    return f"""You are an academic integrity and publication similarity specialist.
+Analyse this manuscript for originality and similarity risks.
+
+1. SIMILARITY TO PUBLISHED LITERATURE: Using the search results below, assess overlap
+   with already-published papers. For each similar paper explain what overlaps and
+   what the authors should do to differentiate.
+
+2. INTERNAL ORIGINALITY AUDIT: Identify passages that are boilerplate, contain
+   factual claims with no citation, show style changes suggesting imported text,
+   or repeat between sections.
+
+3. METHODS SECTION RISK: Assess whether the methods reads as original or copied.
+
+4. OVERALL RISK with specific rewrite advice.
+{search_block}
+
+Return ONLY a valid JSON object — no markdown, no preamble:
+
+{{
+  "overall_risk_level": "Low | Moderate | High | Very High",
+  "estimated_similarity_risk_percent": <integer 0-100>,
+  "disclaimer": "AI-based risk assessment only. Not equivalent to Turnitin or iThenticate. Always use your institution's official similarity checker before submission.",
+  "similar_publications": [
+    {{
+      "title": "<title>",
+      "url": "<url>",
+      "overlap_description": "<what overlaps>",
+      "overlap_type": "topic | methodology | findings | framing | significant overlap",
+      "risk_level": "Low | Moderate | High",
+      "recommendation": "<what authors should do>"
+    }}
+  ],
+  "boilerplate_sections": [
+    {{
+      "section": "<where>",
+      "passage": "<quoted text>",
+      "risk": "<why high risk>",
+      "suggestion": "<how to rewrite>"
+    }}
+  ],
+  "citation_free_claims": [
+    {{
+      "passage": "<quoted text>",
+      "risk": "<what needs citation>",
+      "suggestion": "<what to cite>"
+    }}
+  ],
+  "internal_repetition": [
+    {{
+      "passage": "<quoted text>",
+      "appears_in": ["<section 1>", "<section 2>"]
+    }}
+  ],
+  "methods_risk": "<assessment of methods originality>",
+  "priority_rewrites": ["<specific rewrite instruction>"],
+  "submission_readiness": "<overall verdict and advice>"
+}}"""
+
+
+def call_api_with_pdf(system: str, user_prompt: str, model: str, max_tok: int = 4096) -> str:
+    response = client.messages.create(
+        model=model,
+        max_tokens=max_tok,
+        system=system,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": st.session_state.pdf_base64,
+                    },
+                },
+                {"type": "text", "text": user_prompt},
+            ],
+        }],
+    )
+    return response.content[0].text
+
+
+def call_api_with_text(system: str, user_prompt: str, model: str, max_tok: int = 4096) -> str:
+    text = st.session_state.pdf_text[:100_000]
+    full_prompt = f"MANUSCRIPT TEXT:\n{text}\n\n{user_prompt}"
+    response = client.messages.create(
+        model=model,
+        max_tokens=max_tok,
+        system=system,
+        messages=[{"role": "user", "content": full_prompt}],
+    )
+    return response.content[0].text
+
+
+def extract_search_queries(pdf_text: str) -> list[str]:
+    prompt = (
+        "Read this manuscript excerpt and extract exactly 5 short search queries "
+        "(4-8 words each) representing the most distinctive claims, methods, or findings. "
+        "Return ONLY a JSON array of 5 strings.\n\n"
+        f"MANUSCRIPT EXCERPT:\n{pdf_text[:8000]}"
+    )
+    try:
+        r = client.messages.create(
+            model=CHAT_MODEL, max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = r.content[0].text.strip()
+        return json.loads(raw[raw.index("["):raw.rindex("]")+1])
+    except Exception:
+        lines = [l.strip() for l in pdf_text.split("\n") if len(l.strip()) > 40]
+        return [lines[0][:80]] if lines else ["dental education quality assurance AI"]
+
+
+def search_web(queries: list[str]) -> list[dict]:
+    if not DDG_AVAILABLE:
+        return []
+    results, seen = [], set()
+    try:
+        with DDGS() as ddgs:
+            for q in queries:
+                try:
+                    for r in ddgs.text(
+                        f"{q} site:pubmed.ncbi.nlm.nih.gov OR site:researchgate.net "
+                        f"OR site:tandfonline.com OR site:wiley.com OR site:springer.com "
+                        f"OR site:sciencedirect.com",
+                        max_results=3,
+                    ):
+                        url = r.get("href", "")
+                        if url not in seen:
+                            seen.add(url)
+                            results.append({
+                                "title": r.get("title", ""),
+                                "url": url,
+                                "body": r.get("body", ""),
+                                "query": q,
+                            })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return results[:12]
+
+
+def parse_json(raw: str) -> dict | None:
+    """Parse JSON robustly — handles fences, preamble, truncation, trailing text."""
+    if not raw:
+        return None
+    cleaned = raw.strip()
+
+    # Strip markdown code fences
+    if "```" in cleaned:
+        for part in cleaned.split("```"):
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("{"):
+                cleaned = part
+                break
+
+    # Find start of JSON object
+    try:
+        start = cleaned.index("{")
+    except ValueError:
+        return None
+
+    # Brace matching to find outermost closing brace
+    depth, end = 0, start
+    for i, ch in enumerate(cleaned[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+
+    candidate = cleaned[start:end]
+
+    # If JSON was truncated (depth never closed), repair it
+    if depth != 0:
+        open_count = candidate.count("{") - candidate.count("}")
+        open_arr   = candidate.count("[") - candidate.count("]")
+        candidate  = candidate.rstrip().rstrip(",").rstrip()
+        candidate += "]" * max(0, open_arr) + "}" * max(0, open_count)
 
     try:
-        response = client.messages.create(**kwargs)
-
-        # Extract text from response content blocks
-        text_parts = []
-        for block in response.content:
-            if hasattr(block, "text"):
-                text_parts.append(block.text)
-        return "\n".join(text_parts) if text_parts else "I wasn't able to generate a response. Please try again."
-
-    except anthropic.AuthenticationError:
-        return "⚠️ Invalid API key. Please check your Anthropic API key in the sidebar."
-    except anthropic.RateLimitError:
-        return "⚠️ Rate limit reached. Please wait a moment and try again."
-    except Exception as e:
-        return f"⚠️ An error occurred: {str(e)}"
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        # Last resort: rindex approach
+        try:
+            s = cleaned.index("{")
+            e = cleaned.rindex("}") + 1
+            return json.loads(cleaned[s:e])
+        except Exception:
+            return None
 
 
-def render_phase_stepper(current_phase):
-    """Render the EBL phase progress stepper."""
-    phases = [
-        ("1", "Forming"),
-        ("2", "Storming"),
-        ("3", "Questioning"),
-        ("4", "Seeking"),
-        ("5", "Synthesising"),
+def create_author_feedback_docx(report: dict) -> bytes:
+    doc = Document()
+    doc.styles["Normal"].font.name = "Calibri"
+    doc.styles["Normal"].font.size = Pt(11)
+    h = doc.add_heading("DentEdTech™ — Manuscript Development Feedback", 0)
+    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    fp = doc.sections[0].footer.paragraphs[0]
+    fp.text = "DentEdTech™ Author Feedback — For manuscript improvement only. Not an editorial decision."
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    def h2(t): doc.add_heading(t, level=2)
+
+    note = doc.add_paragraph()
+    note.add_run(
+        "This report is designed to help you strengthen your manuscript before submission. "
+        "All feedback is constructive and focused on enhancing the quality of your work."
+    ).italic = True
+
+    if report.get("author_feedback_summary"):
+        h2("Overall Feedback")
+        doc.add_paragraph(report["author_feedback_summary"])
+
+    scores = report.get("scores", {})
+    if scores:
+        h2("Dimension Scores")
+        for k, v in scores.items():
+            doc.add_paragraph(f"{k.capitalize()}: {v}/10", style="List Bullet")
+
+    kp = report.get("kirkpatrick_level", {})
+    if kp:
+        h2("Educational Outcomes (Kirkpatrick Level)")
+        doc.add_paragraph(
+            f"Your manuscript demonstrates Level {kp.get('level','?')} outcomes. "
+            f"{kp.get('justification','')}"
+        )
+
+    h2("Logical Coherence (Golden Thread)")
+    doc.add_paragraph(report.get("golden_thread", ""))
+
+    if report.get("strengths"):
+        h2("Strengths to Build On")
+        for s in report["strengths"]:
+            doc.add_paragraph(s, style="List Bullet")
+
+    if report.get("weaknesses"):
+        h2("Areas Requiring Attention")
+        for w in report["weaknesses"]:
+            p = doc.add_paragraph(style="List Bullet")
+            p.add_run(f"[{w.get('severity','').upper()} — {w.get('section','')}] ").bold = True
+            p.add_run(w.get("issue", ""))
+            if w.get("suggestion"):
+                doc.add_paragraph(f"Suggested action: {w['suggestion']}", style="List Bullet")
+
+    sc = report.get("section_comments", {})
+    if sc:
+        h2("Section-by-Section Feedback")
+        for sec, comment in sc.items():
+            p = doc.add_paragraph()
+            p.add_run(sec.capitalize() + ": ").bold = True
+            p.add_run(comment)
+
+    ca = report.get("citation_audit", {})
+    if ca:
+        h2("Citation & Reference Feedback")
+        for ref in ca.get("missing_key_references", []):
+            doc.add_paragraph(f"Consider citing: {ref}", style="List Bullet")
+        for ref in ca.get("potentially_outdated", []):
+            doc.add_paragraph(f"Review currency of: {ref}", style="List Bullet")
+        doc.add_paragraph(f"Reference list consistency: {ca.get('mismatches','None identified')}")
+
+    if report.get("actionable_recommendations"):
+        h2("Priority Actions Before Resubmission")
+        for i, rec in enumerate(report["actionable_recommendations"], 1):
+            doc.add_paragraph(f"{i}. {rec}")
+
+    h2("Next Steps")
+    doc.add_paragraph(
+        "We encourage you to address the points above before resubmission. "
+        "The research you are conducting is valuable to the field — "
+        "these revisions will give it the best chance of acceptance."
+    )
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def create_docx(report: dict | None, raw: str) -> bytes:
+    doc = Document()
+    doc.styles["Normal"].font.name = "Calibri"
+    doc.styles["Normal"].font.size = Pt(11)
+    h = doc.add_heading("DentEdTech™ — HPE Peer Review Report", 0)
+    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    fp = doc.sections[0].footer.paragraphs[0]
+    fp.text = (
+        "CONFIDENTIAL — Generated by DentEdTech™. "
+        "Powered by Anthropic API. Not for redistribution."
+    )
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    if report is None:
+        doc.add_paragraph(raw)
+    else:
+        def h2(t): doc.add_heading(t, level=2)
+        verdict    = report.get("verdict", "—")
+        score      = report.get("overall_score", "—")
+        confidence = report.get("confidence", "—")
+        p = doc.add_paragraph()
+        run = p.add_run(f"Verdict: {verdict}  |  Score: {score}/100  |  Confidence: {confidence}")
+        run.bold = True; run.font.size = Pt(13)
+        run.font.color.rgb = RGBColor(0x1A, 0x3A, 0x4A)
+        conf_note = report.get("confidence_note", "")
+        if conf_note:
+            cn = doc.add_paragraph()
+            cn.add_run("Confidence Note: ").bold = True
+            cn.add_run(conf_note).italic = True
+        doc.add_paragraph(report.get("executive_summary", ""))
+        h2("Dimension Scores")
+        for k, v in report.get("scores", {}).items():
+            doc.add_paragraph(f"{k.capitalize()}: {v}/10", style="List Bullet")
+        kp = report.get("kirkpatrick_level", {})
+        if kp:
+            h2("Kirkpatrick Level")
+            doc.add_paragraph(f"Level {kp.get('level','?')}: {kp.get('justification','')}")
+        h2("Golden Thread Analysis")
+        doc.add_paragraph(report.get("golden_thread", ""))
+        h2("Strengths")
+        for s in report.get("strengths", []):
+            doc.add_paragraph(s, style="List Bullet")
+        h2("Weaknesses")
+        for w in report.get("weaknesses", []):
+            doc.add_paragraph(
+                f"[{w.get('severity','').upper()} — {w.get('section','')}] "
+                f"{w.get('issue','')}\n→ {w.get('suggestion','')}",
+                style="List Bullet",
+            )
+        h2("Section-by-Section Comments")
+        for sec, comment in report.get("section_comments", {}).items():
+            p = doc.add_paragraph()
+            p.add_run(sec.capitalize() + ": ").bold = True
+            p.add_run(comment)
+        h2("Citation Audit")
+        ca = report.get("citation_audit", {})
+        for ref in ca.get("missing_key_references", []):
+            doc.add_paragraph(f"Missing: {ref}", style="List Bullet")
+        for ref in ca.get("potentially_outdated", []):
+            doc.add_paragraph(f"Outdated: {ref}", style="List Bullet")
+        doc.add_paragraph(f"Mismatches: {ca.get('mismatches','None identified')}")
+        h2("Actionable Recommendations")
+        for i, rec in enumerate(report.get("actionable_recommendations", []), 1):
+            doc.add_paragraph(f"{i}. {rec}")
+        h2("Confidential Note to Editor")
+        p = doc.add_paragraph(report.get("editor_note", ""))
+        for run in p.runs: run.italic = True
+
+    buf = BytesIO(); doc.save(buf); return buf.getvalue()
+
+
+def render_badge(text: str, colour_key: str, palette: dict) -> str:
+    bg, fg = palette.get(colour_key.lower().strip(), ("#e2e3e5", "#383d41"))
+    return (
+        f'<span style="background:{bg};color:{fg};padding:4px 14px;'
+        f'border-radius:20px;font-weight:600;font-size:0.9rem;">{text}</span>'
+    )
+
+VERDICT_COLOURS = {
+    "accept": ("#d4edda", "#155724"),
+    "minor":  ("#fff3cd", "#856404"),
+    "major":  ("#f8d7da", "#721c24"),
+    "reject": ("#f8d7da", "#491217"),
+}
+CONFIDENCE_COLOURS = {
+    "high":     ("#d4edda", "#155724"),
+    "moderate": ("#fff3cd", "#856404"),
+    "low":      ("#f8d7da", "#721c24"),
+}
+RISK_COLOURS = {
+    "low":       ("#d4edda", "#155724"),
+    "moderate":  ("#fff3cd", "#856404"),
+    "high":      ("#f8d7da", "#721c24"),
+    "very high": ("#f5c6cb", "#491217"),
+}
+
+
+def verdict_key(v: str) -> str:
+    vl = v.lower()
+    if "reject" in vl: return "reject"
+    if "major" in vl:  return "major"
+    if "minor" in vl:  return "minor"
+    return "accept"
+
+
+def compute_agreement_stats() -> dict:
+    log = st.session_state.agreement_log
+    if not log:
+        return {"total": 0, "agree": 0, "partial": 0, "disagree": 0, "rate": None}
+    total   = len(log)
+    agree   = sum(1 for r in log if r["feedback"] == "agree")
+    partial = sum(1 for r in log if r["feedback"] == "partial")
+    disagree= sum(1 for r in log if r["feedback"] == "disagree")
+    rate    = round((agree + 0.5 * partial) / total * 100, 1) if total else None
+    return {"total": total, "agree": agree, "partial": partial, "disagree": disagree, "rate": rate}
+
+
+# ─── SIDEBAR ──────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown(
+        """
+        <div style="padding:0.5rem 0 1rem;">
+          <div style="font-family:'Playfair Display',Georgia,serif;
+                      font-size:1.4rem;font-weight:600;color:#f0ebe0;
+                      letter-spacing:-0.01em;line-height:1.2;">
+            DentEdTech™
+          </div>
+          <div style="font-family:'Source Serif 4',Georgia,serif;
+                      font-size:0.72rem;font-weight:300;font-style:italic;
+                      color:#7a8a9a;margin-top:0.2rem;letter-spacing:0.04em;">
+            Manuscript Intelligence Platform
+          </div>
+          <div style="width:24px;height:1px;background:#b5903a;margin-top:0.8rem;"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Partner: {st.session_state.access_partner}")
+
+    # Session cap indicator
+    if st.session_state.is_admin:
+        st.markdown(
+            "<div style='font-family:Source Serif 4,serif;font-size:0.72rem;"
+            "color:#8fd4b8;letter-spacing:0.06em;padding:0.3rem 0;'>"
+            "&#10022; Admin access &mdash; unlimited analyses</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        used = st.session_state.analyses_this_session
+        remaining = SESSION_ANALYSIS_CAP - used
+        cap_pct = int(used / SESSION_ANALYSIS_CAP * 100)
+        st.progress(cap_pct / 100, text=f"Session usage: {used}/{SESSION_ANALYSIS_CAP} analyses")
+        if remaining == 0:
+            st.error(
+                "Session limit reached. "
+                "Contact [DentEdTech™](mailto:your@email.com) for extended access."
+            )
+
+    with st.expander("🔒 Data & Privacy Status", expanded=False):
+        st.markdown(
+            f"""
+            | Item | Status |
+            |---|---|
+            | Access granted | ✅ {st.session_state.access_partner} |
+            | Files written to disk | ✅ Never |
+            | API provider | Anthropic |
+            | Training on API data | ✅ No |
+            | Session started | {st.session_state.session_start.strftime('%H:%M UTC')} |
+            | Documents processed | {st.session_state.upload_count} |
+            """
+        )
+        if st.session_state.pdf_hash:
+            st.caption(f"SHA-256: `{st.session_state.pdf_hash[:16]}…`")
+        st.markdown("[Privacy Policy](https://www.anthropic.com/privacy) · [Request ZDR](https://www.anthropic.com/contact-sales)")
+
+    # Agreement tracking panel
+    stats = compute_agreement_stats()
+    if stats["total"] > 0:
+        with st.expander(f"📊 Agreement Tracking ({stats['total']} reviews)", expanded=False):
+            if stats["rate"] is not None:
+                st.metric("Agreement rate", f"{stats['rate']}%")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("✅ Agree",    stats["agree"])
+            c2.metric("⚠️ Partial", stats["partial"])
+            c3.metric("❌ Disagree", stats["disagree"])
+            st.caption("Anonymous — no manuscript data stored.")
+
+    st.divider()
+
+    uploaded = st.file_uploader("Upload manuscript (PDF)", type=["pdf"])
+    if uploaded:
+        if uploaded.name != st.session_state.pdf_name or not st.session_state.pdf_base64:
+            with st.spinner("Encoding PDF in memory…"):
+                b64, txt, sha = encode_pdf(uploaded)
+            if sha != st.session_state.pdf_hash:
+                st.session_state.pdf_base64        = b64
+                st.session_state.pdf_text          = txt
+                st.session_state.pdf_hash          = sha
+                st.session_state.pdf_name          = uploaded.name
+                st.session_state.report            = None
+                st.session_state.raw_report        = ""
+                st.session_state.chat_history      = []
+                st.session_state.similarity_report = None
+                st.session_state.raw_similarity    = ""
+                st.session_state.search_results    = []
+                st.session_state.feedback_given    = False
+                st.session_state.upload_count     += 1
+                st.success(f"✅ New file: {uploaded.name}")
+            else:
+                st.success(f"✅ {uploaded.name} (unchanged)")
+        else:
+            st.success(f"✅ {uploaded.name}")
+        st.caption(f"{len(st.session_state.pdf_text):,} chars · SHA-256: {st.session_state.pdf_hash[:12]}…")
+
+    st.divider()
+    journal = st.selectbox("Target journal", JOURNALS)
+
+    st.markdown("**Review criteria**")
+    selected_criteria = [
+        k for k, label in REVIEW_CRITERIA.items()
+        if st.checkbox(label, value=True, key=f"cb_{k}")
     ]
 
-    html = '<div class="phase-stepper">'
-    for num, label in phases:
-        phase_num = int(num)
-        if phase_num < current_phase:
-            dot_class = "phase-dot phase-dot-done"
-            label_class = "phase-label"
-            dot_content = "✓"
-        elif phase_num == current_phase:
-            dot_class = "phase-dot phase-dot-active"
-            label_class = "phase-label phase-label-active"
-            dot_content = num
-        else:
-            dot_class = "phase-dot phase-dot-pending"
-            label_class = "phase-label"
-            dot_content = num
+    st.divider()
+    can_analyze = (
+        bool(st.session_state.pdf_base64)
+        and len(selected_criteria) > 0
+        and check_session_cap()
+    )
+    if st.button("🚀 Run Full Analysis", disabled=not can_analyze, use_container_width=True):
+        st.session_state.report         = None
+        st.session_state.raw_report     = ""
+        st.session_state.chat_history   = []
+        st.session_state.feedback_given = False
+        st.session_state["_trigger_analysis"] = True
 
-        html += f"""
-        <div class="phase-step">
-            <div class="{dot_class}">{dot_content}</div>
-            <div class="{label_class}">{label}</div>
-        </div>"""
+    st.divider()
+    if st.button("🗑️ Clear Session Data", use_container_width=True):
+        clear_session_data()
+        st.success("Session cleared.")
+        st.rerun()
 
-    html += "</div>"
-    st.markdown(html, unsafe_allow_html=True)
+    st.caption("⚠️ All data clears when you close this tab.")
 
+# ─── ANALYSIS ─────────────────────────────────────────────────────────────────
+if st.session_state.get("_trigger_analysis"):
+    st.session_state["_trigger_analysis"] = False
 
-def render_message(role, content):
-    """Render a chat message with styling."""
-    if role == "user":
-        css_class = "chat-msg chat-msg-user"
-        icon = "🧑‍🎓"
-    elif role == "system":
-        css_class = "chat-msg chat-msg-system"
-        icon = "🔔"
-    else:
-        css_class = "chat-msg chat-msg-assistant"
-        icon = "🔬"
+    if not check_session_cap():
+        st.error("Session analysis limit reached. Contact DentEdTech™ for extended access.")
+        st.stop()
 
+    system = build_system_prompt(journal)
+    prompt = build_review_prompt(selected_criteria, journal)
+    phases = [
+        "Phase 1 — Deep document read & structure audit",
+        "Phase 2 — Methodology & criteria assessment",
+        "Phase 3 — Citation audit & gap analysis",
+        "Phase 4 — Generating structured review report",
+    ]
+
+    progress = st.progress(0)
+    status   = st.status("Running analysis…", expanded=True)
+    raw = None; model_used = PRIMARY_MODEL
+
+    for i, phase in enumerate(phases):
+        status.write(f"⚙️ {phase}")
+        progress.progress((i + 1) / len(phases))
+
+    try:
+        status.write(f"🧠 Sending to {PRIMARY_MODEL}…")
+        raw = call_api_with_pdf(system, prompt, PRIMARY_MODEL)
+        model_used = PRIMARY_MODEL
+    except NotFoundError:
+        status.write(f"⚠️ Falling back to {FALLBACK_MODEL}…")
+        try:
+            raw = call_api_with_pdf(system, prompt, FALLBACK_MODEL)
+            model_used = FALLBACK_MODEL
+        except Exception:
+            raw = call_api_with_text(system, prompt, FALLBACK_MODEL)
+            model_used = FALLBACK_MODEL + " (text)"
+    except Exception as e:
+        try:
+            raw = call_api_with_text(system, prompt, PRIMARY_MODEL)
+            model_used = PRIMARY_MODEL + " (text)"
+        except Exception as e2:
+            status.update(label=f"Error: {e2}", state="error")
+            st.stop()
+
+    progress.progress(1.0)
+    st.session_state.report     = parse_json(raw)
+    st.session_state.raw_report = raw
+    st.session_state.model_used = model_used
+    st.session_state.analyses_this_session += 1
+
+    st.session_state.chat_history = [
+        {"role": "user", "content": [
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                            "data": st.session_state.pdf_base64}},
+            {"type": "text", "text": "This is the manuscript we just reviewed."},
+        ]},
+        {"role": "assistant", "content": f"Peer review complete:\n{raw}"},
+    ]
+    status.update(label="Analysis complete ✓", state="complete", expanded=False)
+    st.rerun()
+
+# ─── IDLE STATE ───────────────────────────────────────────────────────────────
+if not st.session_state.report and not st.session_state.raw_report:
     st.markdown(
-        f'<div class="{css_class}">{icon} {content}</div>',
+        """
+        <div style="max-width:680px;margin:5rem auto;text-align:center;">
+          <div style="font-family:'Source Serif 4',Georgia,serif;
+                      font-size:0.68rem;letter-spacing:0.32em;text-transform:uppercase;
+                      color:#8a9aaa;margin-bottom:1.2rem;">
+            Health Professions Education · Manuscript Intelligence
+          </div>
+          <h1 style="font-family:'Playfair Display',Georgia,serif;
+                     font-size:3rem;font-weight:600;color:#0f2535;
+                     margin:0 0 0.4rem;letter-spacing:-0.03em;line-height:1.1;">
+            DentEdTech™
+          </h1>
+          <div style="font-family:'Source Serif 4',Georgia,serif;
+                      font-size:1.05rem;font-weight:300;font-style:italic;
+                      color:#6a7a8a;margin-bottom:2rem;">
+            Expert peer review intelligence for dental &amp; health professions education journals
+          </div>
+          <div style="width:48px;height:1px;background:#b5903a;margin:0 auto 2.5rem;"></div>
+          <p style="font-family:'Source Serif 4',Georgia,serif;
+                    font-size:0.92rem;color:#6a6460;line-height:1.85;
+                    max-width:480px;margin:0 auto 3rem;">
+            Upload a manuscript PDF using the sidebar, select your target journal
+            and review criteria, then run the analysis.
+          </p>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;">
+            <span style="font-family:'Source Serif 4',serif;font-size:0.74rem;
+                         letter-spacing:0.06em;text-transform:uppercase;
+                         color:#1a3a4a;background:#f0ebe0;border:1px solid #ddd8cc;
+                         padding:5px 14px;border-radius:2px;">Confidence scoring</span>
+            <span style="font-family:'Source Serif 4',serif;font-size:0.74rem;
+                         letter-spacing:0.06em;text-transform:uppercase;
+                         color:#1a3a4a;background:#f0ebe0;border:1px solid #ddd8cc;
+                         padding:5px 14px;border-radius:2px;">CONSORT · SRQR · COREQ</span>
+            <span style="font-family:'Source Serif 4',serif;font-size:0.74rem;
+                         letter-spacing:0.06em;text-transform:uppercase;
+                         color:#1a3a4a;background:#f0ebe0;border:1px solid #ddd8cc;
+                         padding:5px 14px;border-radius:2px;">Kirkpatrick framework</span>
+            <span style="font-family:'Source Serif 4',serif;font-size:0.74rem;
+                         letter-spacing:0.06em;text-transform:uppercase;
+                         color:#1a3a4a;background:#f0ebe0;border:1px solid #ddd8cc;
+                         padding:5px 14px;border-radius:2px;">Citation audit</span>
+            <span style="font-family:'Source Serif 4',serif;font-size:0.74rem;
+                         letter-spacing:0.06em;text-transform:uppercase;
+                         color:#1a3a4a;background:#f0ebe0;border:1px solid #ddd8cc;
+                         padding:5px 14px;border-radius:2px;">Web similarity search</span>
+            <span style="font-family:'Source Serif 4',serif;font-size:0.74rem;
+                         letter-spacing:0.06em;text-transform:uppercase;
+                         color:#1a3a4a;background:#f0ebe0;border:1px solid #ddd8cc;
+                         padding:5px 14px;border-radius:2px;">Author feedback report</span>
+            <span style="font-family:'Source Serif 4',serif;font-size:0.74rem;
+                         letter-spacing:0.06em;text-transform:uppercase;
+                         color:#1a3a4a;background:#f0ebe0;border:1px solid #ddd8cc;
+                         padding:5px 14px;border-radius:2px;">Agreement tracking</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+# ─── MAIN DISPLAY ─────────────────────────────────────────────────────────────
+report = st.session_state.report
+raw    = st.session_state.raw_report
+
+show_cap_warning()
+st.markdown(
+    f"<div style='font-family:Source Serif 4,serif;font-size:0.75rem;"
+    f"font-style:italic;color:#8a847a;margin-bottom:0.5rem;'>"
+    f"Analysis generated with {st.session_state.model_used}</div>",
+    unsafe_allow_html=True,
+)
+
+tab_report, tab_author, tab_similarity, tab_chat, tab_feedback = st.tabs([
+    "Editor Report",
+    "Author Feedback",
+    "Similarity Audit",
+    "Editor Chat",
+    "Feedback",
+])
+
+# ─── REPORT TAB ───────────────────────────────────────────────────────────────
+with tab_report:
+    if report is None:
+        st.warning("Could not parse structured JSON — showing raw report.")
+        st.text_area("Raw report", raw, height=600)
+    else:
+        verdict    = report.get("verdict", "Unknown")
+        score      = report.get("overall_score", "—")
+        confidence = report.get("confidence", "Unknown")
+        conf_note  = report.get("confidence_note", "")
+
+        col_v, col_c, col_s, col_dl = st.columns([3, 2, 1, 1])
+        with col_v:
+            st.markdown(render_badge(verdict, verdict_key(verdict), VERDICT_COLOURS), unsafe_allow_html=True)
+        with col_c:
+            st.markdown(render_badge(f"Confidence: {confidence}", confidence.lower(), CONFIDENCE_COLOURS), unsafe_allow_html=True)
+        with col_s:
+            st.metric("Score", f"{score}/100")
+        with col_dl:
+            st.download_button(
+                "⬇️ Editor .docx",
+                data=create_docx(report, raw),
+                file_name="DentEdTech_Editor_Report.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+
+        if confidence.lower() in ("moderate", "low"):
+            st.warning(
+                f"⚠️ **Confidence flag — {confidence}:** {conf_note}\n\n"
+                "*The AI has flagged uncertainty about this verdict. "
+                "Editor verification is strongly recommended before any desk-rejection decision.*"
+            )
+        elif conf_note:
+            st.info(f"ℹ️ **Confidence note:** {conf_note}")
+
+        st.markdown(f"> {report.get('executive_summary','')}")
+        st.divider()
+
+        scores = report.get("scores", {})
+        if scores:
+            cols = st.columns(len(scores))
+            for col, (k, v) in zip(cols, scores.items()):
+                col.metric(k.capitalize(), f"{v}/10")
+
+        kp = report.get("kirkpatrick_level", {})
+        if kp:
+            st.info(f"🎯 **Kirkpatrick Level {kp.get('level','?')}** — {kp.get('justification','')}")
+
+        st.divider()
+
+        with st.expander("🧵 Golden Thread Analysis", expanded=True):
+            st.write(report.get("golden_thread", "—"))
+
+        if report.get("strengths"):
+            with st.expander(f"✅ Strengths ({len(report['strengths'])})", expanded=True):
+                for s in report["strengths"]:
+                    st.markdown(f"- {s}")
+
+        weaknesses = report.get("weaknesses", [])
+        if weaknesses:
+            majors = [w for w in weaknesses if w.get("severity") == "major"]
+            minors = [w for w in weaknesses if w.get("severity") != "major"]
+            with st.expander(f"⚠️ Weaknesses — {len(majors)} major, {len(minors)} minor", expanded=True):
+                for w in weaknesses:
+                    sev = w.get("severity","minor")
+                    st.markdown(
+                        f"{'🔴' if sev=='major' else '🟡'} "
+                        f"**[{sev.upper()} — {w.get('section','')}]** {w.get('issue','')}"
+                    )
+                    if w.get("suggestion"):
+                        st.caption(f"→ {w['suggestion']}")
+
+        sc = report.get("section_comments", {})
+        if sc:
+            with st.expander("📝 Section-by-Section Comments"):
+                for section, comment in sc.items():
+                    st.markdown(f"**{section.capitalize()}**")
+                    st.write(comment)
+                    st.divider()
+
+        ca = report.get("citation_audit", {})
+        if ca:
+            with st.expander("📚 Citation Audit"):
+                for ref in ca.get("missing_key_references", []):
+                    st.markdown(f"- Missing: {ref}")
+                for ref in ca.get("potentially_outdated", []):
+                    st.markdown(f"- Outdated: {ref}")
+                st.markdown(f"**Mismatches:** {ca.get('mismatches','None identified')}")
+
+        recs = report.get("actionable_recommendations", [])
+        if recs:
+            with st.expander(f"✅ Actionable Recommendations ({len(recs)})", expanded=True):
+                for i, rec in enumerate(recs, 1):
+                    st.markdown(f"**{i}.** {rec}")
+
+        if report.get("editor_note"):
+            with st.expander("🔒 Confidential Note to Editor"):
+                st.info(report["editor_note"])
+
+        # Agreement feedback
+        st.divider()
+        st.markdown("#### 📊 Editor Agreement Feedback")
+        st.caption("Does this AI verdict match your own assessment? Anonymous feedback only.")
+
+        if not st.session_state.feedback_given:
+            col_a, col_b, col_c = st.columns(3)
+            for label, val, col in [
+                ("✅ I agree", "agree", col_a),
+                ("⚠️ Partially agree", "partial", col_b),
+                ("❌ I disagree", "disagree", col_c),
+            ]:
+                if col.button(label, use_container_width=True):
+                    st.session_state.agreement_log.append({
+                        "verdict": verdict, "score": score,
+                        "feedback": val,
+                        "timestamp": datetime.datetime.utcnow().isoformat(),
+                    })
+                    st.session_state.feedback_given = True
+                    st.rerun()
+        else:
+            last = st.session_state.agreement_log[-1]["feedback"]
+            icons = {"agree": "✅", "partial": "⚠️", "disagree": "❌"}
+            st.success(f"{icons.get(last,'✅')} Feedback recorded — thank you.")
+            stats = compute_agreement_stats()
+            if stats["total"] >= 3:
+                st.info(f"📊 Running agreement rate across {stats['total']} reviews: **{stats['rate']}%**")
+
+# ─── AUTHOR FEEDBACK TAB ─────────────────────────────────────────────────────
+with tab_author:
+    st.info(
+        "This tab generates a **constructive author-facing report** — "
+        "no verdict, no editor note. Safe to share directly with authors."
+    )
+    if report is None:
+        st.warning("Run a full analysis first.")
+    else:
+        with st.expander("👁️ Preview author feedback", expanded=True):
+            st.markdown("**Overall feedback:**")
+            st.write(report.get("author_feedback_summary", "No summary available."))
+            st.markdown("**Strengths:**")
+            for s in report.get("strengths", []):
+                st.markdown(f"- {s}")
+            st.markdown("**Priority actions before resubmission:**")
+            for i, rec in enumerate(report.get("actionable_recommendations", []), 1):
+                st.markdown(f"**{i}.** {rec}")
+
+        st.download_button(
+            "⬇️ Download Author Feedback Report (.docx)",
+            data=create_author_feedback_docx(report),
+            file_name="DentEdTech_Author_Feedback.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+        st.caption("This report contains no editorial verdict or confidential content.")
+
+# ─── SIMILARITY TAB ───────────────────────────────────────────────────────────
+with tab_similarity:
+    st.info(
+        "⚠️ **Disclaimer:** Searches open-access content only. "
+        "Not equivalent to Turnitin or iThenticate. "
+        "Always use your institution's official similarity checker before submission."
+    )
+
+    if not DDG_AVAILABLE:
+        st.warning("Add `duckduckgo-search` to `requirements.txt` to enable web search.")
+
+    if st.session_state.pdf_name:
+        col_f, col_clr = st.columns([4, 1])
+        with col_f:
+            st.caption(f"📄 **{st.session_state.pdf_name}** · SHA-256: `{st.session_state.pdf_hash[:16]}…`")
+        with col_clr:
+            if st.button("🔄 Clear audit"):
+                st.session_state.similarity_report = None
+                st.session_state.raw_similarity    = ""
+                st.session_state.search_results    = []
+                st.rerun()
+
+    if st.button("🔍 Run Similarity & Originality Audit",
+                 disabled=not bool(st.session_state.pdf_base64)):
+        st.session_state.similarity_report = None
+        st.session_state.raw_similarity    = ""
+        st.session_state.search_results    = []
+
+        with st.status("Running similarity audit…", expanded=True) as ss:
+            ss.write("🔎 Step 1 — Extracting key phrases…")
+            queries = extract_search_queries(st.session_state.pdf_text)
+            ss.write(f"   {len(queries)} queries extracted")
+
+            if DDG_AVAILABLE:
+                ss.write("🌐 Step 2 — Searching open-access publications…")
+                sr = search_web(queries)
+                st.session_state.search_results = sr
+                ss.write(f"   {len(sr)} papers found")
+            else:
+                sr = []
+                ss.write("⚠️ Step 2 — Web search skipped")
+
+            ss.write("🧠 Step 3 — AI originality analysis…")
+            sim_prompt  = build_similarity_prompt(sr)
+            sim_system  = (
+                "You are an academic integrity specialist. Analyse manuscripts for "
+                "similarity risks, boilerplate, paraphrase patterns, and published overlap. "
+                "Be precise, quote passages, never fabricate."
+            )
+            sim_raw = None
+            try:
+                sim_raw = call_api_with_pdf(sim_system, sim_prompt, FALLBACK_MODEL, max_tok=8000)
+            except Exception as e:
+                ss.write(f"⚠️ PDF mode failed ({e}) — text mode…")
+                try:
+                    sim_raw = call_api_with_text(sim_system, sim_prompt, FALLBACK_MODEL, max_tok=8000)
+                except Exception as e2:
+                    ss.update(label=f"Error: {e2}", state="error"); st.stop()
+
+            parsed_sim = parse_json(sim_raw)
+            st.session_state.similarity_report = parsed_sim
+            st.session_state.raw_similarity    = sim_raw
+            ss.update(label="Similarity audit complete ✓", state="complete", expanded=False)
+        st.rerun()
+
+    sim = st.session_state.similarity_report
+    if sim is None and st.session_state.raw_similarity:
+        sim = parse_json(st.session_state.raw_similarity)
+        if sim:
+            st.session_state.similarity_report = sim
+        else:
+            # Parse totally failed — render a readable plain-text report from the raw response
+            raw_d = st.session_state.raw_similarity.replace("```json","").replace("```","").strip()
+            st.info(
+                "The AI returned a response that could not be fully structured. "
+                "The full analysis is displayed below as plain text."
+            )
+            # Try to extract key fields manually and show them nicely
+            import re
+            def extract_field(text, key):
+                pattern = rf'"{key}"\s*:\s*"([^"]+)"'
+                m = re.search(pattern, text)
+                if m: return m.group(1)
+                pattern2 = rf'"{key}"\s*:\s*(\d+)'
+                m2 = re.search(pattern2, text)
+                if m2: return m2.group(1)
+                return None
+
+            risk   = extract_field(raw_d, "overall_risk_level") or "See full response below"
+            est    = extract_field(raw_d, "estimated_similarity_risk_percent") or "—"
+            ready  = extract_field(raw_d, "submission_readiness") or ""
+            disc   = extract_field(raw_d, "disclaimer") or ""
+
+            if risk != "See full response below":
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(render_badge(f"Risk: {risk}", risk.lower(), RISK_COLOURS), unsafe_allow_html=True)
+                with col2:
+                    st.metric("Estimated %", f"~{est}%")
+                if disc:
+                    st.caption(disc)
+                if ready:
+                    st.markdown(f"**Submission readiness:** {ready}")
+                st.divider()
+
+            # Show full response as readable text, not JSON
+            # Strip JSON structure markers and show as prose
+            clean = re.sub(r'[\{\}\[\]"]', " ", raw_d)
+            clean = re.sub(r',\s*\n', "\n", clean)
+            clean = re.sub(r'\s{2,}', " ", clean)
+            lines = [l.strip() for l in clean.split("\n") if l.strip() and len(l.strip()) > 3]
+            for line in lines:
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    key = parts[0].strip().replace("_", " ").title()
+                    val = parts[1].strip() if len(parts) > 1 else ""
+                    if val and len(val) > 2:
+                        st.markdown(f"**{key}:** {val}")
+                elif len(line) > 10:
+                    st.markdown(f"- {line}")
+
+    elif sim:
+        risk = sim.get("overall_risk_level", "Unknown")
+        est  = sim.get("estimated_similarity_risk_percent", "—")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown(render_badge(f"Risk: {risk}", risk.lower(), RISK_COLOURS), unsafe_allow_html=True)
+        with col2:
+            st.metric("Estimated %", f"~{est}%", help="AI estimate — not Turnitin")
+        st.caption(sim.get("disclaimer",""))
+        st.markdown(f"**Submission readiness:** {sim.get('submission_readiness','—')}")
+        st.divider()
+
+        pubs = sim.get("similar_publications", [])
+        label = f"🌐 Similar Publications Found Online ({len(pubs)})" if pubs else "🌐 Similar Publications Found Online"
+        with st.expander(label, expanded=bool(pubs)):
+            if pubs:
+                for p in pubs:
+                    rl = p.get("risk_level","")
+                    st.markdown(
+                        f"**{p.get('title','')}** "
+                        f"{render_badge(rl, rl.lower(), RISK_COLOURS)}",
+                        unsafe_allow_html=True,
+                    )
+                    if p.get("url"): st.markdown(f"🔗 [{p['url']}]({p['url']})")
+                    st.markdown(f"**Overlap:** {p.get('overlap_description','')}")
+                    if p.get("recommendation"): st.success(f"✏️ {p['recommendation']}")
+                    st.divider()
+            else:
+                st.success("✅ No significantly similar papers identified.")
+
+        if st.session_state.search_results:
+            with st.expander(f"🔎 Raw Search Results ({len(st.session_state.search_results)})", expanded=False):
+                for r in st.session_state.search_results:
+                    st.markdown(f"**{r['title']}**")
+                    st.caption(f"`{r['query']}` · {r['url']}")
+                    st.write(r["body"][:200] + "…")
+                    st.divider()
+
+        boiler = sim.get("boilerplate_sections", [])
+        with st.expander(f"📋 Boilerplate Sections ({len(boiler)})" if boiler else "📋 Boilerplate Sections", expanded=bool(boiler)):
+            if boiler:
+                for item in boiler:
+                    st.markdown(f"**Section:** {item.get('section','')}")
+                    st.warning(f"🔴 **High-risk passage:**\n> {item.get('passage','')}")
+                    st.caption(f"Risk: {item.get('risk','')}")
+                    st.success(f"✏️ {item.get('suggestion','')}")
+                    st.divider()
+            else:
+                st.success("✅ No significant boilerplate detected.")
+
+        claims = sim.get("citation_free_claims", [])
+        with st.expander(f"📎 Citation-Free Claims ({len(claims)})" if claims else "📎 Citation-Free Claims", expanded=bool(claims)):
+            if claims:
+                for item in claims:
+                    st.warning(f"🟡 > {item.get('passage','')}")
+                    st.caption(item.get('risk',''))
+                    st.success(f"✏️ {item.get('suggestion','')}")
+                    st.divider()
+            else:
+                st.success("✅ No significant uncited claims detected.")
+
+        repeats = sim.get("internal_repetition", [])
+        with st.expander(f"🔁 Internal Repetition ({len(repeats)})" if repeats else "🔁 Internal Repetition", expanded=bool(repeats)):
+            if repeats:
+                for item in repeats:
+                    st.warning(f"🟡 > {item.get('passage','')}")
+                    st.caption(f"Appears in: {', '.join(item.get('appears_in',[]))}")
+                    st.divider()
+            else:
+                st.success("✅ No significant internal repetition detected.")
+
+        if sim.get("methods_risk"):
+            with st.expander("🔬 Methods Section Originality", expanded=True):
+                st.write(sim["methods_risk"])
+
+        rewrites = sim.get("priority_rewrites", [])
+        if rewrites:
+            with st.expander(f"✏️ Priority Rewrites ({len(rewrites)})", expanded=True):
+                for i, rw in enumerate(rewrites, 1):
+                    st.markdown(f"**{i}.** {rw}")
+
+# ─── CHAT TAB ─────────────────────────────────────────────────────────────────
+with tab_chat:
+    st.caption("Ask questions about the review or manuscript. Full PDF is in context.")
+
+    quick_prompts = [
+        "Expand on the methodology critique",
+        "Which specific citations are missing and why?",
+        "How can the Discussion be strengthened?",
+        "Explain the golden thread score in detail",
+        "What would reach Kirkpatrick Level 3 or 4?",
+        "Suggest a revised abstract",
+    ]
+    cols = st.columns(3)
+    for i, qp in enumerate(quick_prompts):
+        if cols[i % 3].button(qp, key=f"qp_{i}", use_container_width=True):
+            st.session_state._pending_chat = qp
+
+    st.divider()
+
+    for msg in st.session_state.chat_history[2:]:
+        role    = msg["role"]
+        content = msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
+        with st.chat_message(role):
+            st.markdown(content)
+
+    pending    = st.session_state.pop("_pending_chat", None)
+    user_input = st.chat_input("Ask about the review or manuscript…") or pending
+
+    if user_input:
+        with st.chat_message("user"):
+            st.markdown(user_input)
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                try:
+                    response = client.messages.create(
+                        model=FALLBACK_MODEL,
+                        max_tokens=2048,
+                        system=(
+                            "You are a Senior HPE Journal Editor who just completed a peer review. "
+                            "Answer questions precisely, quote manuscript passages when relevant, "
+                            "and suggest concrete improvements."
+                        ),
+                        messages=st.session_state.chat_history,
+                    )
+                    reply = response.content[0].text
+                except Exception as e:
+                    reply = f"Error: {e}"
+            st.markdown(reply)
+        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+# ─── FEEDBACK TAB ─────────────────────────────────────────────────────────────
+with tab_feedback:
+    st.markdown(
+        """
+        <div style="max-width:640px;margin:0 auto;">
+          <div style="font-family:'Playfair Display',Georgia,serif;font-size:1.6rem;
+                      font-weight:600;color:#0f2535;margin-bottom:0.3rem;">
+            Platform Feedback
+          </div>
+          <div style="font-family:'Source Serif 4',Georgia,serif;font-size:0.9rem;
+                      font-style:italic;color:#6a7a8a;margin-bottom:1.5rem;">
+            Help us improve DentEdTech™ — your feedback is sent directly to the development team.
+          </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-
-def render_real_ai_badges(pillars):
-    """Render REAL-AI pillar badges."""
-    badge_map = {
-        "R": ("pillar-r", "Reflective Integration"),
-        "E": ("pillar-e", "Equity by Design"),
-        "A": ("pillar-a", "Authentic Alignment"),
-        "L": ("pillar-l", "Learning Partnership"),
-    }
-    html = ""
-    for p in pillars:
-        cls, label = badge_map[p]
-        html += f'<span class="pillar-badge {cls}">{label}</span>'
-    return html
-
-
-# ─── Sidebar ───
-with st.sidebar:
-    st.markdown("""
-    <div style="text-align:center; padding: 1rem 0 0.5rem;">
-        <span style="font-family: 'DM Serif Display', serif; font-size: 1.5rem; color: #E8EDE9;">
-            Dent<span style="color: #D4A853;">Ed</span>Tech
-        </span>
-        <div style="font-size: 0.72rem; color: #6B8577; margin-top: 0.2rem; letter-spacing: 0.08em; text-transform: uppercase;">
-            Evidence Engine
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
-
-    # API Key
-    api_key_input = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        placeholder="sk-ant-...",
-        help="Required to power the AI engine. Your key is not stored.",
-        key="api_key",
-    )
-
-    st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
-
-    # Student context
-    st.markdown("##### 🎓 Your Profile")
-    st.session_state.discipline = st.selectbox(
-        "Discipline",
-        ["Dentistry", "Medicine", "Pharmacology"],
-        index=0,
-    )
-    st.session_state.year_of_study = st.selectbox(
-        "Year of Study",
-        ["Year 1", "Year 2", "Year 3", "Year 4", "Year 5", "Postgraduate"],
-        index=2,
-    )
-
-    st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
-
-    # REAL-AI Info
-    with st.expander("📐 About the REAL-AI Framework"):
-        st.markdown("""
-        This platform is built on the **REAL-AI** framework for principled AI integration in health professions education:
-
-        **R** — Reflective Integration
-        *AI promotes critical thinking, not dependency*
-
-        **E** — Equity by Design
-        *Inclusive, unbiased, accessible learning*
-
-        **A** — Authentic Clinical Alignment
-        *Transparent about what AI can and cannot do*
-
-        **L** — Learning-Centred Partnership
-        *AI augments faculty, never replaces them*
-
-        *Framework: Beyond the Algorithm (2026)*
-        """)
-
-    st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
-
-    # Mode switch / Reset
-    if st.session_state.mode is not None:
-        if st.button("← Back to Mode Selection", use_container_width=True):
-            st.session_state.mode = None
-            st.rerun()
-
-        if st.button("🔄 Reset Conversation", use_container_width=True):
-            if st.session_state.mode == "evidence":
-                st.session_state.evidence_messages = []
-                st.session_state.reflection_given = False
-            else:
-                st.session_state.ebl_messages = []
-                st.session_state.ebl_phase = 1
-                st.session_state.ebl_case = None
-            st.rerun()
-
-    st.markdown("""
-    <div class="app-footer">
-        © 2026 DentEdTech<br>
-        University of Manchester<br>
-        <em>Not a substitute for clinical judgement</em>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# ─── Main Content ───
-
-# Header
-st.markdown("""
-<div class="main-header">
-    <h1>Dent<span class="brand-accent">Ed</span>Tech Evidence Engine</h1>
-    <div class="tagline">Theory-informed AI for health professions learning — built on the REAL-AI framework</div>
-</div>
-""", unsafe_allow_html=True)
-
-
-# ─── Mode Selection ───
-if st.session_state.mode is None:
-
-    st.markdown(f"""
-    <div style="text-align: center; margin-bottom: 2rem;">
-        <span style="color: var(--text-secondary); font-size: 0.9rem;">
-            Welcome, {st.session_state.discipline} student · {st.session_state.year_of_study} · University of Manchester
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    col1, col2 = st.columns(2, gap="large")
-
-    with col1:
-        st.markdown(f"""
-        <div class="mode-card">
-            <h3>🔬 Evidence-Based Knowledge</h3>
-            <p>
-                Ask clinical or scientific questions and receive evidence-based answers sourced
-                exclusively from peer-reviewed journals, university resources, and verified
-                educational videos.
-            </p>
-            <p>
-                The engine will first prompt you to reflect on what you already know — building
-                deeper learning through the Reflective Integration pillar.
-            </p>
-            <div style="margin-top: 0.8rem;">
-                {render_real_ai_badges(["R", "A"])}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Enter Evidence Mode →", key="btn_evidence", use_container_width=True):
-            st.session_state.mode = "evidence"
-            st.rerun()
-
-    with col2:
-        st.markdown(f"""
-        <div class="mode-card">
-            <h3>🧭 Enquiry-Based Learning</h3>
-            <p>
-                Develop your inquiry skills through a guided 5-phase cycle: Forming, Storming,
-                Questioning, Seeking, and Synthesising. The AI will never give you direct
-                answers — it guides you to discover them yourself.
-            </p>
-            <p>
-                Combines problem-based learning with Kolb's experiential cycle for
-                deep, transferable clinical reasoning.
-            </p>
-            <div style="margin-top: 0.8rem;">
-                {render_real_ai_badges(["R", "E", "A", "L"])}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Enter EBL Mode →", key="btn_ebl", use_container_width=True):
-            st.session_state.mode = "ebl"
-            # Set initial EBL welcome
-            welcome = (
-                "📍 **Phase 1: FORMING**\n\n"
-                "Welcome to Enquiry-Based Learning. This is where your inquiry journey begins.\n\n"
-                "You can either:\n"
-                "- **Bring your own case** — describe a clinical scenario, lecture topic, or problem you're working through\n"
-                "- **Ask me for a case** — tell me the subject area and I'll present a scenario for you to explore\n\n"
-                "Before we begin, take a moment: *What topic or clinical area are you most curious about right now?*"
-            )
-            st.session_state.ebl_messages = [{"role": "assistant", "content": welcome}]
-            st.rerun()
-
-    # Framework overview
-    st.markdown("<hr class='section-divider'>", unsafe_allow_html=True)
-
-    st.markdown("""
-    <div style="text-align: center; margin: 1rem 0 1.5rem;">
-        <span style="font-family: 'DM Serif Display', serif; font-size: 1.1rem; color: var(--text-primary);">
-            How the REAL-AI Framework Guides This Platform
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    p1, p2, p3, p4 = st.columns(4, gap="medium")
-
-    with p1:
-        st.markdown("""
-        <div class="mode-card" style="min-height: 180px;">
-            <span class="pillar-badge pillar-r">R</span>
-            <h3 style="font-size: 1rem !important;">Reflective Integration</h3>
-            <p>AI pauses and prompts you to think before revealing answers. Your reasoning comes first.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with p2:
-        st.markdown("""
-        <div class="mode-card" style="min-height: 180px;">
-            <span class="pillar-badge pillar-e">E</span>
-            <h3 style="font-size: 1rem !important;">Equity by Design</h3>
-            <p>Diverse evidence, inclusive scenarios, and accessible design for all learners.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with p3:
-        st.markdown("""
-        <div class="mode-card" style="min-height: 180px;">
-            <span class="pillar-badge pillar-a">A</span>
-            <h3 style="font-size: 1rem !important;">Authentic Alignment</h3>
-            <p>Every response declares its limitations. Evidence is sourced, graded, and clinically contextualised.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with p4:
-        st.markdown("""
-        <div class="mode-card" style="min-height: 180px;">
-            <span class="pillar-badge pillar-l">L</span>
-            <h3 style="font-size: 1rem !important;">Learning Partnership</h3>
-            <p>AI supports your faculty, never replaces them. You're guided to grow, not to depend.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-
-# ─── Evidence-Based Mode ───
-elif st.session_state.mode == "evidence":
-
-    st.markdown(f"""
-    <div style="margin-bottom: 1.5rem;">
-        <span style="font-family: 'DM Serif Display', serif; font-size: 1.4rem; color: var(--text-primary);">
-            🔬 Evidence-Based Knowledge
-        </span>
-        <span style="margin-left: 1rem;">
-            {render_real_ai_badges(["R", "A"])}
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Transparency notice
-    st.markdown("""
-    <div class="limitation-notice">
-        <strong>⚠️ Pillar 3 — Transparency Statement:</strong>
-        This AI searches peer-reviewed journals, university websites, and verified educational videos.
-        It may not capture all available evidence. Always verify findings against primary sources
-        and discuss with your supervisors. This tool does not replicate clinical reasoning under real-world conditions.
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Display conversation history
-    for msg in st.session_state.evidence_messages:
-        render_message(msg["role"], msg["content"])
-
-    # Input
-    user_input = st.chat_input(
-        "Ask a clinical or scientific question...",
-        key="evidence_input",
-    )
-
-    if user_input:
-        # Add user message
-        st.session_state.evidence_messages.append(
-            {"role": "user", "content": user_input}
+    if st.session_state.feedback_submitted:
+        st.success(
+            "✅ Thank you — your feedback has been recorded. "
+            "Please click the button below to send it directly to the DentEdTech™ team."
         )
-        render_message("user", user_input)
-
-        # Build messages for API — include student context
-        context_note = f"[Student context: {st.session_state.discipline}, {st.session_state.year_of_study}, University of Manchester]"
-        api_messages = []
-        for msg in st.session_state.evidence_messages:
-            if msg["role"] == "user" and msg == st.session_state.evidence_messages[0]:
-                api_messages.append({
-                    "role": "user",
-                    "content": f"{context_note}\n\n{msg['content']}"
-                })
-            else:
-                api_messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"],
-                })
-
-        # Call Claude with web search enabled for evidence retrieval
-        with st.spinner("Searching evidence-based sources..."):
-            response = call_claude(
-                api_messages,
-                EVIDENCE_SYSTEM_PROMPT,
-                use_search=True,
+        col_a, col_b = st.columns(2)
+        with col_a:
+            mailto = st.session_state.get("_last_mailto", "mailto:ayman.khalifah@manchester.ac.uk")
+            st.markdown(
+                f'<a href="{mailto}" target="_blank">'
+                f'<button style="width:100%;padding:0.55rem 1rem;'
+                f'background:#0f2535;color:#f0ebe0;border:none;border-radius:3px;'
+                f'font-family:Source Serif 4,serif;font-size:0.88rem;'
+                f'letter-spacing:0.04em;cursor:pointer;">'
+                f'📧 Send Feedback Email</button></a>',
+                unsafe_allow_html=True,
             )
-
-        st.session_state.evidence_messages.append(
-            {"role": "assistant", "content": response}
-        )
-        st.rerun()
-
-
-# ─── EBL Mode ───
-elif st.session_state.mode == "ebl":
-
-    st.markdown(f"""
-    <div style="margin-bottom: 1rem;">
-        <span style="font-family: 'DM Serif Display', serif; font-size: 1.4rem; color: var(--text-primary);">
-            🧭 Enquiry-Based Learning
-        </span>
-        <span style="margin-left: 1rem;">
-            {render_real_ai_badges(["R", "E", "A", "L"])}
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Phase stepper
-    render_phase_stepper(st.session_state.ebl_phase)
-
-    # Phase descriptions
-    phase_info = {
-        1: ("Forming", "Encounter the problem. Activate what you already know. Identify the edges of your understanding."),
-        2: ("Storming", "Generate hypotheses freely. Challenge assumptions. Explore multiple perspectives without filtering."),
-        3: ("Questioning", "Transform your uncertainty into structured, searchable research questions."),
-        4: ("Seeking", "Plan your evidence search strategy. Learn where and how to find reliable sources."),
-        5: ("Synthesising", "Connect your findings back to the case. Reflect on what changed in your thinking."),
-    }
-
-    phase_name, phase_desc = phase_info[st.session_state.ebl_phase]
-    st.markdown(f"""
-    <div class="ebl-phase">
-        <div class="ebl-phase-title">📍 Phase {st.session_state.ebl_phase}: {phase_name}</div>
-        <div class="ebl-phase-desc">{phase_desc}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Transparency notice for EBL
-    st.markdown("""
-    <div class="limitation-notice">
-        <strong>⚠️ EBL Commitment:</strong>
-        This mode will NOT give you direct answers or evidence. It guides your inquiry process.
-        The struggle of finding answers yourself is where deep learning happens.
-        Bring your findings to your tutor for validation.
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Display conversation history
-    for msg in st.session_state.ebl_messages:
-        render_message(msg["role"], msg["content"])
-
-    # Phase navigation buttons
-    nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
-    with nav_col1:
-        if st.session_state.ebl_phase > 1:
-            if st.button("← Previous Phase"):
-                st.session_state.ebl_phase -= 1
-                transition_msg = f"📍 Moving back to **Phase {st.session_state.ebl_phase}: {phase_info[st.session_state.ebl_phase][0]}**\n\n{phase_info[st.session_state.ebl_phase][1]}"
-                st.session_state.ebl_messages.append(
-                    {"role": "assistant", "content": transition_msg}
+        with col_b:
+            csv_data = st.session_state.get("_last_feedback_csv", b"")
+            if csv_data:
+                st.download_button(
+                    "⬇️ Download as CSV",
+                    data=csv_data,
+                    file_name="DentEdTech_Feedback.csv",
+                    mime="text/csv",
+                    use_container_width=True,
                 )
-                st.rerun()
-    with nav_col3:
-        if st.session_state.ebl_phase < 5:
-            if st.button("Next Phase →"):
-                st.session_state.ebl_phase += 1
-                transition_msg = f"📍 Progressing to **Phase {st.session_state.ebl_phase}: {phase_info[st.session_state.ebl_phase][0]}**\n\n{phase_info[st.session_state.ebl_phase][1]}\n\nLet's continue your inquiry."
-                st.session_state.ebl_messages.append(
-                    {"role": "assistant", "content": transition_msg}
+        st.caption(
+            "The email button opens your mail client pre-filled with your feedback. "
+            "The CSV lets you save a copy for your records."
+        )
+        st.divider()
+        if st.button("Submit another response"):
+            st.session_state.feedback_submitted = False
+            st.rerun()
+    else:
+        with st.form("feedback_form", clear_on_submit=True):
+            st.markdown("#### About you")
+            col_name, col_role = st.columns(2)
+            with col_name:
+                fb_name = st.text_input(
+                    "Your name (optional)",
+                    placeholder="e.g. Dr. Jane Smith",
                 )
-                st.rerun()
-
-    # Input
-    user_input = st.chat_input(
-        "Share your thinking...",
-        key="ebl_input",
-    )
-
-    if user_input:
-        # Add user message
-        st.session_state.ebl_messages.append(
-            {"role": "user", "content": user_input}
-        )
-        render_message("user", user_input)
-
-        # Build API messages with phase context
-        context_note = (
-            f"[Student context: {st.session_state.discipline}, {st.session_state.year_of_study}, "
-            f"University of Manchester]\n"
-            f"[Current EBL Phase: {st.session_state.ebl_phase} — {phase_info[st.session_state.ebl_phase][0]}]\n"
-            f"[Facilitate according to Phase {st.session_state.ebl_phase} guidelines. "
-            f"If the student seems ready to progress, suggest moving to the next phase.]"
-        )
-
-        api_messages = []
-        for i, msg in enumerate(st.session_state.ebl_messages):
-            if i == 0 and msg["role"] == "assistant":
-                api_messages.append(msg)
-            elif msg["role"] == "user" and i == len(st.session_state.ebl_messages) - 1:
-                api_messages.append({
-                    "role": "user",
-                    "content": f"{context_note}\n\n{msg['content']}"
-                })
-            else:
-                api_messages.append(msg)
-
-        # Call Claude WITHOUT web search (EBL must not provide evidence)
-        with st.spinner("Reflecting on your inquiry..."):
-            response = call_claude(
-                api_messages,
-                EBL_SYSTEM_PROMPT,
-                use_search=False,
+            with col_role:
+                fb_role = st.selectbox(
+                    "Your role",
+                    [
+                        "Journal Editor",
+                        "Managing Editor",
+                        "Academic Researcher",
+                        "Dental Educator",
+                        "HPE Educator",
+                        "Publishing Professional",
+                        "Other",
+                    ],
+                )
+            fb_institution = st.text_input(
+                "Institution / Journal (optional)",
+                placeholder="e.g. European Journal of Dental Education",
+            )
+            fb_email = st.text_input(
+                "Your email (optional — only if you would like a response)",
+                placeholder="e.g. j.smith@university.ac.uk",
             )
 
-        # Check if AI suggests phase transition
-        if st.session_state.ebl_phase < 5:
-            transition_keywords = {
-                1: ["move to storming", "phase 2", "ready to storm", "let's storm"],
-                2: ["move to questioning", "phase 3", "ready to question", "form your questions"],
-                3: ["move to seeking", "phase 4", "ready to seek", "where to look"],
-                4: ["move to synthesising", "phase 5", "ready to synthesise", "bring it together"],
+            st.divider()
+            st.markdown("#### Your experience")
+
+            fb_overall = st.select_slider(
+                "Overall satisfaction with DentEdTech™",
+                options=["Very dissatisfied", "Dissatisfied", "Neutral", "Satisfied", "Very satisfied"],
+                value="Satisfied",
+            )
+
+            fb_accuracy = st.select_slider(
+                "How accurate was the AI review compared to your own editorial assessment?",
+                options=["Very inaccurate", "Somewhat inaccurate", "Neutral", "Somewhat accurate", "Very accurate"],
+                value="Somewhat accurate",
+            )
+
+            fb_usefulness = st.select_slider(
+                "How useful would this tool be in your editorial workflow?",
+                options=["Not useful", "Slightly useful", "Moderately useful", "Very useful", "Essential"],
+                value="Moderately useful",
+            )
+
+            st.divider()
+            st.markdown("#### Detailed feedback")
+
+            fb_worked_well = st.text_area(
+                "What worked well? What did you find most valuable?",
+                placeholder="e.g. The confidence scoring helped me understand when to apply extra scrutiny...",
+                height=100,
+            )
+
+            fb_improvements = st.text_area(
+                "What needs improvement? What frustrated you or felt inaccurate?",
+                placeholder="e.g. The citation audit missed some key recent papers...",
+                height=100,
+            )
+
+            fb_features = st.text_area(
+                "What features or capabilities would you like to see added?",
+                placeholder="e.g. Integration with submission systems, batch processing, language support...",
+                height=100,
+            )
+
+            fb_recommend = st.radio(
+                "Would you recommend DentEdTech™ to a colleague?",
+                ["Definitely yes", "Probably yes", "Not sure", "Probably not", "Definitely not"],
+                horizontal=True,
+            )
+
+            fb_pilot = st.radio(
+                "Would you be interested in a formal pilot partnership with your journal?",
+                ["Yes, very interested", "Possibly interested", "Not at this stage", "Not applicable"],
+                horizontal=True,
+            )
+
+            fb_other = st.text_area(
+                "Any other comments, suggestions, or questions?",
+                placeholder="Anything else you would like us to know...",
+                height=80,
+            )
+
+            st.divider()
+            submitted = st.form_submit_button(
+                "Submit Feedback →",
+                use_container_width=True,
+            )
+
+        if submitted:
+            import urllib.parse
+            import csv
+            import io
+            import datetime as dt
+
+            # Build feedback summary
+            feedback_data = {
+                "Timestamp":            dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                "Partner":              st.session_state.access_partner,
+                "Name":                 fb_name or "Anonymous",
+                "Role":                 fb_role,
+                "Institution":          fb_institution or "Not provided",
+                "Email":                fb_email or "Not provided",
+                "Overall satisfaction": fb_overall,
+                "Accuracy":             fb_accuracy,
+                "Usefulness":           fb_usefulness,
+                "What worked well":     fb_worked_well or "Not provided",
+                "Improvements needed":  fb_improvements or "Not provided",
+                "Feature requests":     fb_features or "Not provided",
+                "Would recommend":      fb_recommend,
+                "Pilot interest":       fb_pilot,
+                "Other comments":       fb_other or "None",
             }
-            check_keys = transition_keywords.get(st.session_state.ebl_phase, [])
-            if any(kw in response.lower() for kw in check_keys):
-                st.session_state.ebl_phase += 1
 
-        st.session_state.ebl_messages.append(
-            {"role": "assistant", "content": response}
-        )
-        st.rerun()
+            # Store in session for display
+            if "all_feedback" not in st.session_state:
+                st.session_state.all_feedback = []
+            st.session_state.all_feedback.append(feedback_data)
+
+            # Build mailto link so user can send directly
+            body_lines = [f"{k}: {v}" for k, v in feedback_data.items()]
+            body_text  = "%0A".join(body_lines)
+            subject    = urllib.parse.quote(
+                f"DentEdTech Feedback — {fb_role} — {fb_overall}"
+            )
+            mailto_url = (
+                f"mailto:ayman.khalifah@manchester.ac.uk"
+                f"?subject={subject}&body={body_text}"
+            )
+
+            # Build CSV for download
+            csv_buf = io.StringIO()
+            writer  = csv.DictWriter(csv_buf, fieldnames=list(feedback_data.keys()))
+            writer.writeheader()
+            writer.writerow(feedback_data)
+            csv_bytes = csv_buf.getvalue().encode("utf-8")
+
+            st.session_state.feedback_submitted   = True
+            st.session_state._last_mailto         = mailto_url
+            st.session_state._last_feedback_csv   = csv_bytes
+            st.rerun()
