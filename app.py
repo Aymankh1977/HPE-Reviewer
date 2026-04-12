@@ -1541,13 +1541,45 @@ if st.session_state.get("_trigger_analysis"):
     st.session_state.model_used = model_used
     st.session_state.analyses_this_session += 1
 
+    # Build a plain-English chat seed so the editor chat responds in prose not JSON
+    parsed_seed = parse_json(raw)
+    if parsed_seed:
+        verdict    = parsed_seed.get("verdict", "—")
+        score      = parsed_seed.get("overall_score", "—")
+        confidence = parsed_seed.get("confidence", "—")
+        summary    = parsed_seed.get("executive_summary", "")
+        kp         = parsed_seed.get("kirkpatrick_level", {})
+        kp_text    = f"Kirkpatrick Level {kp.get('level','?')}: {kp.get('justification','')}" if kp else "—"
+        strengths  = parsed_seed.get("strengths", [])
+        weaknesses = parsed_seed.get("weaknesses", [])
+        recs       = parsed_seed.get("actionable_recommendations", [])
+        seed_msg = (
+            f"I have completed a full structured peer review of this manuscript.\n\n"
+            f"VERDICT: {verdict} | Score: {score}/100 | Confidence: {confidence}\n\n"
+            f"SUMMARY: {summary}\n\n"
+            f"KIRKPATRICK: {kp_text}\n\n"
+            f"STRENGTHS ({len(strengths)}):\n" +
+            "\n".join(f"- {s}" for s in strengths[:5]) + "\n\n"
+            f"KEY WEAKNESSES ({len(weaknesses)}):\n" +
+            "\n".join(f"- [{w.get('severity','').upper()}] {w.get('section','')}: {w.get('issue','')}" for w in weaknesses[:5]) + "\n\n"
+            f"TOP RECOMMENDATIONS:\n" +
+            "\n".join(f"{i+1}. {r}" for i, r in enumerate(recs[:5])) + "\n\n"
+            f"I am ready to answer any questions about this review or the manuscript in detail."
+        )
+    else:
+        seed_msg = (
+            "I have completed a full structured peer review of this manuscript. "
+            "I am ready to answer any questions about the methodology, citations, "
+            "structure, or any aspect of the review in plain language."
+        )
+
     st.session_state.chat_history = [
         {"role": "user", "content": [
             {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
                                             "data": st.session_state.pdf_base64}},
-            {"type": "text", "text": "This is the manuscript we just reviewed."},
+            {"type": "text", "text": "This is the manuscript we just reviewed. Please answer all my questions about it in clear, plain English — never return JSON."},
         ]},
-        {"role": "assistant", "content": f"Peer review complete:\n{raw}"},
+        {"role": "assistant", "content": seed_msg},
     ]
     status.update(label="Analysis complete ✓", state="complete", expanded=False)
     st.rerun()
@@ -2032,9 +2064,12 @@ with tab_chat:
                         model=FALLBACK_MODEL,
                         max_tokens=2048,
                         system=(
-                            "You are a Senior HPE Journal Editor who just completed a peer review. "
-                            "Answer questions precisely, quote manuscript passages when relevant, "
-                            "and suggest concrete improvements."
+                            "You are a Senior HPE Journal Editor discussing a peer review you just completed. "
+                            "Answer every question in clear, natural, conversational English prose. "
+                            "Never return JSON, never use code blocks, never use structured data formats. "
+                            "Quote specific manuscript passages when relevant. "
+                            "Be constructive, precise, and suggest concrete improvements. "
+                            "Write as an expert colleague speaking directly to another editor."
                         ),
                         messages=st.session_state.chat_history,
                     )
